@@ -1,0 +1,371 @@
+import EventKit
+import Foundation
+
+/// Command-line entry point. Kept in the library target so it is testable.
+public enum CLI {
+    public static func main(arguments: [String]) -> Int32 {
+        let command = arguments.first ?? "serve"
+
+        switch command {
+        case "serve":
+            return serve()
+        case "init":
+            return initialise(force: arguments.contains("--force"))
+        case "token":
+            return token(subcommand: arguments.dropFirst().first)
+        case "preflight":
+            return preflight()
+        case "doctor":
+            return doctor()
+        case "config":
+            print(ConfigPaths.configFile.path)
+            return 0
+        case "endpoint":
+            // Used by the installer so it never has to parse JSON in shell.
+            do {
+                let configuration = try ConfigurationLoader.load().configuration
+                print("http://\(configuration.host):\(configuration.port)")
+                return 0
+            } catch {
+                print("http://\(Configuration.defaultHost):\(Configuration.defaultPort)")
+                return 0
+            }
+        case "version", "--version", "-v":
+            print("remote-shortcuts \(BuildInfo.version)")
+            return 0
+        case "help", "--help", "-h":
+            printUsage()
+            return 0
+        default:
+            FileHandle.standardError.write(Data("Unknown command '\(command)'\n\n".utf8))
+            printUsage()
+            return 64 // EX_USAGE
+        }
+    }
+
+    static func printUsage() {
+        print("""
+        remote-shortcuts \(BuildInfo.version) — webhook server for Apple Shortcuts, Calendar, Reminders and Notes
+
+        USAGE
+          remote-shortcuts <command>
+
+        COMMANDS
+          serve       Start the HTTP server (default)
+          init        Create the config file and generate an API token
+          token show  Print the current API token
+          token rotate  Generate and store a new API token
+          preflight   Request every macOS permission the server needs
+          doctor      Check config, permissions and dependencies
+          config      Print the config file path
+          version     Print the version
+
+        CONFIGURATION
+          File: \(ConfigPaths.configFile.path)
+          Environment overrides:
+            REMOTE_SHORTCUTS_TOKEN, REMOTE_SHORTCUTS_TOKEN_FILE
+            REMOTE_SHORTCUTS_HOST, REMOTE_SHORTCUTS_PORT
+            REMOTE_SHORTCUTS_DISABLE (comma-separated: shortcuts,calendars,reminders,notes)
+            REMOTE_SHORTCUTS_READ_ONLY, REMOTE_SHORTCUTS_LOOPBACK_ONLY
+            REMOTE_SHORTCUTS_ALLOWED_ORIGINS, REMOTE_SHORTCUTS_LOG_LEVEL
+            REMOTE_SHORTCUTS_CONFIG_DIR
+        """)
+    }
+
+    // MARK: - serve
+
+    static func serve() -> Int32 {
+        do {
+            let result = try ConfigurationLoader.load()
+            Log.shared.setLevel(result.configuration.logLevel)
+            for warning in result.warnings { Log.warn(warning) }
+            try App(configuration: result.configuration).run()
+            return 0
+        } catch let error as ConfigurationError {
+            fail(error.description)
+            return 78 // EX_CONFIG
+        } catch let error as HTTPServer.ServerError {
+            fail(error.description)
+            return 74 // EX_IOERR
+        } catch {
+            fail("\(error)")
+            return 70 // EX_SOFTWARE
+        }
+    }
+
+    // MARK: - init / token
+
+    static func initialise(force: Bool) -> Int32 {
+        let file = ConfigPaths.configFile
+        if FileManager.default.fileExists(atPath: file.path) && !force {
+            print("Config already exists at \(file.path)")
+            print("Run 'remote-shortcuts token show' to see the token, or pass --force to start over.")
+            return 0
+        }
+
+        let token = TokenGenerator.generate()
+        let template: [String: Any] = [
+            "host": Configuration.defaultHost,
+            "port": Int(Configuration.defaultPort),
+            "token": token,
+            "modules": ["shortcuts": true, "calendars": true, "reminders": true, "notes": true],
+            "allowed_shortcuts": [],
+            "allowed_origins": [],
+            "read_only": false,
+            "rate_limit_per_minute": 120,
+            "shortcut_timeout_seconds": 120,
+            "log_level": "info",
+        ]
+
+        do {
+            try writeConfig(template)
+        } catch {
+            fail("Could not write \(file.path): \(error.localizedDescription)")
+            return 73 // EX_CANTCREAT
+        }
+
+        print("Created \(file.path) (mode 600)")
+        print("")
+        print("API token: \(token)")
+        print("")
+        print("Test it with:")
+        print("  curl -H 'Authorization: Bearer \(token)' http://127.0.0.1:\(Configuration.defaultPort)/v1")
+        return 0
+    }
+
+    static func token(subcommand: String?) -> Int32 {
+        switch subcommand {
+        case "show", nil:
+            do {
+                let result = try ConfigurationLoader.load()
+                print(result.configuration.token)
+                return 0
+            } catch {
+                fail("\(error)")
+                return 78
+            }
+        case "rotate":
+            do {
+                var raw = try loadRawConfig()
+                let token = TokenGenerator.generate()
+                raw["token"] = token
+                raw.removeValue(forKey: "token_file")
+                try writeConfig(raw)
+                print(token)
+                FileHandle.standardError.write(Data("""
+
+                Token rotated. Restart the server so it picks up the new value:
+                  launchctl kickstart -k gui/$(id -u)/com.remoteshortcuts.server
+
+                """.utf8))
+                return 0
+            } catch {
+                fail("\(error)")
+                return 73
+            }
+        default:
+            fail("Usage: remote-shortcuts token [show|rotate]")
+            return 64
+        }
+    }
+
+    static func loadRawConfig() throws -> [String: Any] {
+        let file = ConfigPaths.configFile
+        guard FileManager.default.fileExists(atPath: file.path) else { return [:] }
+        return try JSON.decodeObject(try Data(contentsOf: file))
+    }
+
+    /// Writes the config atomically with mode 600, creating the directory
+    /// (mode 700) if needed. The token lives here, so permissions are set at
+    /// creation time rather than fixed up afterwards.
+    static func writeConfig(_ object: [String: Any]) throws {
+        let directory = ConfigPaths.configDirectory
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        let file = ConfigPaths.configFile
+        let data = try JSON.encode(object, pretty: true)
+        let temporary = directory.appendingPathComponent(".config.json.\(UUID().uuidString)")
+        FileManager.default.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600])
+
+        // `replaceItemAt` needs an existing destination, which is not the case
+        // on a first run.
+        if FileManager.default.fileExists(atPath: file.path) {
+            _ = try FileManager.default.replaceItemAt(file, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: file)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    }
+
+    // MARK: - preflight
+
+    /// Triggers every macOS permission prompt in one go, from a terminal where
+    /// the user is present to click Allow. Doing this at install time means the
+    /// background LaunchAgent never has to ask.
+    static func preflight() -> Int32 {
+        print("Requesting macOS permissions. Approve each prompt as it appears.\n")
+
+        let eventKit = EventKitService()
+
+        print("• Calendars … ", terminator: "")
+        fflush(stdout)
+        let calendars = eventKit.requestAccess(to: .event)
+        print(calendars ? "granted" : "NOT granted")
+
+        print("• Reminders … ", terminator: "")
+        fflush(stdout)
+        let reminders = eventKit.requestAccess(to: .reminder)
+        print(reminders ? "granted" : "NOT granted")
+
+        print("• Apple Notes (Automation) … ", terminator: "")
+        fflush(stdout)
+        var notesOK = false
+        if NotesService.isAvailable() {
+            do {
+                _ = try NotesService(timeout: 120).probe()
+                notesOK = true
+                print("granted")
+            } catch {
+                print("NOT granted")
+            }
+        } else {
+            print("Notes.app not installed — skipped")
+        }
+
+        print("• Shortcuts CLI … ", terminator: "")
+        let shortcutsAvailable = ShortcutsService.isAvailable()
+        print(shortcutsAvailable ? "available" : "MISSING (needs macOS 12+)")
+
+        let allGood = calendars && reminders && (notesOK || !NotesService.isAvailable()) && shortcutsAvailable
+        print("")
+        if allGood {
+            print("All set.")
+            return 0
+        }
+        print("""
+        Some permissions are missing. Grant them in:
+          System Settings → Privacy & Security → Calendars / Reminders / Automation
+        Then run 'remote-shortcuts preflight' again.
+        """)
+        return 1
+    }
+
+    // MARK: - doctor
+
+    static func doctor() -> Int32 {
+        var problems = 0
+
+        print("remote-shortcuts \(BuildInfo.version)\n")
+
+        print("Configuration")
+        let file = ConfigPaths.configFile
+        if FileManager.default.fileExists(atPath: file.path) {
+            print("  file: \(file.path)")
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+               let mode = (attributes[.posixPermissions] as? NSNumber)?.uint16Value {
+                let octal = String(mode, radix: 8)
+                if mode & 0o077 != 0 {
+                    print("  mode: \(octal)  ✗ readable by other users — run: chmod 600 \(file.path)")
+                    problems += 1
+                } else {
+                    print("  mode: \(octal)  ✓")
+                }
+            }
+        } else {
+            print("  ✗ no config file — run 'remote-shortcuts init'")
+            problems += 1
+        }
+
+        var configuration: Configuration?
+        do {
+            let result = try ConfigurationLoader.load()
+            configuration = result.configuration
+            print("  bind: \(result.configuration.host):\(result.configuration.port)")
+            print("  token: configured (\(result.configuration.token.count) chars)")
+            print("  read-only: \(result.configuration.readOnly)")
+            if result.configuration.allowedShortcuts.isEmpty {
+                print("  shortcut allow-list: not set (any shortcut may run)")
+            } else {
+                print("  shortcut allow-list: \(result.configuration.allowedShortcuts.count) entries")
+            }
+            for warning in result.warnings {
+                print("  ! \(warning)")
+            }
+        } catch {
+            print("  ✗ \(error)")
+            problems += 1
+        }
+
+        print("\nPermissions")
+        for (label, status) in [
+            ("Calendars", EventKitService.authorisationStatus(for: .event)),
+            ("Reminders", EventKitService.authorisationStatus(for: .reminder)),
+        ] {
+            switch status {
+            case .granted:
+                print("  \(label): granted ✓")
+            case .notDetermined:
+                print("  \(label): not requested yet — run 'remote-shortcuts preflight'")
+                problems += 1
+            case .denied:
+                print("  \(label): denied ✗ — System Settings → Privacy & Security → \(label)")
+                problems += 1
+            case .restricted:
+                print("  \(label): restricted by policy ✗")
+                problems += 1
+            }
+        }
+
+        print("\nDependencies")
+        if ShortcutsService.isAvailable() {
+            print("  /usr/bin/shortcuts: present ✓")
+        } else {
+            print("  /usr/bin/shortcuts: missing ✗ (requires macOS 12+)")
+            problems += 1
+        }
+        if NotesService.isAvailable() {
+            do {
+                let count = try NotesService(timeout: 20).probe()
+                print("  Apple Notes: reachable ✓ (\(count) folders)")
+            } catch let error as APIError {
+                print("  Apple Notes: \(error.message) ✗")
+                problems += 1
+            } catch {
+                print("  Apple Notes: \(error) ✗")
+                problems += 1
+            }
+        } else {
+            print("  Apple Notes: not installed —")
+        }
+
+        print("\nService")
+        let agent = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.remoteshortcuts.server.plist")
+        if FileManager.default.fileExists(atPath: agent.path) {
+            print("  LaunchAgent: installed ✓")
+            if let configuration {
+                print("  probe: curl -sS -H 'Authorization: Bearer <token>' http://\(configuration.host):\(configuration.port)/v1/health")
+            }
+        } else {
+            print("  LaunchAgent: not installed — run scripts/install.sh to start it at login")
+        }
+
+        print("")
+        if problems == 0 {
+            print("No problems found.")
+            return 0
+        }
+        print("\(problems) problem\(problems == 1 ? "" : "s") found.")
+        return 1
+    }
+
+    // MARK: - helpers
+
+    static func fail(_ message: String) {
+        FileHandle.standardError.write(Data("error: \(message)\n".utf8))
+    }
+}

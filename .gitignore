@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+.DS_Store
+
+# Never commit a resolved manifest: this project has no dependencies, so its
+# presence means something went wrong.
+Package.resolved

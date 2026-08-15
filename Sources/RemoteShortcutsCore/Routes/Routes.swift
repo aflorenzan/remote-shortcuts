@@ -1,0 +1,391 @@
+import EventKit
+import Foundation
+
+/// Wires the HTTP surface onto the services. One file so the whole API is
+/// readable top to bottom.
+public struct RouteBuilder {
+    let configuration: Configuration
+    let eventKit: EventKitService
+    let notes: NotesService
+    let shortcuts: ShortcutsService
+
+    public init(
+        configuration: Configuration,
+        eventKit: EventKitService,
+        notes: NotesService,
+        shortcuts: ShortcutsService
+    ) {
+        self.configuration = configuration
+        self.eventKit = eventKit
+        self.notes = notes
+        self.shortcuts = shortcuts
+    }
+
+    public func build() -> Router {
+        let router = Router()
+        registerMeta(router)
+        if configuration.modules.shortcuts { registerShortcuts(router) }
+        if configuration.modules.calendars { registerCalendars(router) }
+        if configuration.modules.reminders { registerReminders(router) }
+        if configuration.modules.notes { registerNotes(router) }
+        return router
+    }
+
+    // MARK: - Meta
+
+    private func registerMeta(_ router: Router) {
+        router.get("/v1/health") { _ in
+            .json([
+                "status": "ok",
+                "version": BuildInfo.version,
+                "time": DateParsing.format(Date()),
+            ])
+        }
+
+        router.get("/v1") { _ in
+            .json([
+                "name": "remote-shortcuts",
+                "version": BuildInfo.version,
+                "modules": configuration.modules.asJSON,
+                "read_only": configuration.readOnly,
+                "endpoints": endpointCatalogue(),
+            ])
+        }
+
+        router.get("/v1/system/permissions") { _ in
+            .json(["permissions": permissionReport()])
+        }
+    }
+
+    private func endpointCatalogue() -> [String] {
+        var endpoints = ["GET /v1", "GET /v1/health", "GET /v1/system/permissions"]
+        if configuration.modules.shortcuts {
+            endpoints += ["GET /v1/shortcuts", "POST /v1/shortcuts/run"]
+        }
+        if configuration.modules.calendars {
+            endpoints += [
+                "GET /v1/calendars",
+                "GET /v1/calendars/events",
+                "POST /v1/calendars/events",
+                "GET /v1/calendars/events/:id",
+                "PATCH /v1/calendars/events/:id",
+                "DELETE /v1/calendars/events/:id",
+            ]
+        }
+        if configuration.modules.reminders {
+            endpoints += [
+                "GET /v1/reminders/lists",
+                "GET /v1/reminders",
+                "POST /v1/reminders",
+                "PATCH /v1/reminders/:id",
+                "POST /v1/reminders/:id/complete",
+                "DELETE /v1/reminders/:id",
+            ]
+        }
+        if configuration.modules.notes {
+            endpoints += [
+                "GET /v1/notes/folders",
+                "GET /v1/notes",
+                "POST /v1/notes",
+                "GET /v1/notes/:id",
+                "PATCH /v1/notes/:id",
+                "DELETE /v1/notes/:id",
+            ]
+        }
+        return endpoints
+    }
+
+    func permissionReport() -> [String: Any] {
+        func describe(_ access: EventKitService.Access) -> String {
+            switch access {
+            case .granted: return "granted"
+            case .denied: return "denied"
+            case .notDetermined: return "not_determined"
+            case .restricted: return "restricted"
+            }
+        }
+        return [
+            "calendars": describe(EventKitService.authorisationStatus(for: .event)),
+            "reminders": describe(EventKitService.authorisationStatus(for: .reminder)),
+            "shortcuts_cli": ShortcutsService.isAvailable() ? "available" : "missing",
+            "notes_app": NotesService.isAvailable() ? "available" : "missing",
+        ]
+    }
+
+    // MARK: - Shortcuts
+
+    private func registerShortcuts(_ router: Router) {
+        router.get("/v1/shortcuts") { _ in
+            let items = try shortcuts.list()
+            return .json([
+                "shortcuts": items,
+                "count": items.count,
+                "allow_list_active": shortcuts.allowListActive,
+            ])
+        }
+
+        // Running a shortcut is a POST because it has side effects, even
+        // though it reads like a lookup.
+        router.post("/v1/shortcuts/run") { request in
+            let body = try request.jsonBody()
+            return try runShortcut(name: try body.nonEmptyString("name"), body: body)
+        }
+
+        // Convenience form so an n8n HTTP node can put the name in the URL.
+        router.post("/v1/shortcuts/:name/run") { request in
+            let body = (try? request.jsonBody()) ?? JSONBody([:])
+            return try runShortcut(name: try request.parameter("name"), body: body)
+        }
+    }
+
+    private func runShortcut(name: String, body: JSONBody) throws -> HTTPResponse {
+        // `input` accepts either a string or any JSON value; objects and arrays
+        // are re-encoded so the shortcut receives valid JSON text.
+        var input: String?
+        if body.has("input") {
+            if let text = body.raw["input"] as? String {
+                input = text
+            } else if let value = body.raw["input"] {
+                input = String(data: try JSON.encode(value), encoding: .utf8)
+            }
+        }
+
+        let result = try shortcuts.run(name: name, input: input, timeout: try body.optionalDouble("timeout"))
+
+        var payload: [String: Any] = [
+            "shortcut": result.name,
+            "output": result.output,
+            "duration_seconds": result.durationSeconds,
+        ]
+        if result.outputIsJSON, let decoded = ShortcutsService.decodeJSONOutput(result.output) {
+            payload["output_json"] = decoded
+        }
+        return .json(payload)
+    }
+
+    // MARK: - Calendars
+
+    private func registerCalendars(_ router: Router) {
+        router.get("/v1/calendars") { _ in
+            let calendars = try eventKit.listCalendars(entity: .event)
+            return .json(["calendars": calendars, "count": calendars.count])
+        }
+
+        router.get("/v1/calendars/events") { request in
+            // Default window: today through a week out — the range an
+            // automation asks for when it does not say.
+            let start = try request.queryDate("start") ?? Calendar.current.startOfDay(for: Date())
+            let end = try request.queryDate("end") ?? start.addingTimeInterval(7 * 24 * 3600)
+            let query = EventKitService.EventQuery(
+                start: start,
+                end: end,
+                calendars: request.queryList("calendars"),
+                search: request.query["q"],
+                limit: min(try request.queryInt("limit") ?? 250, 1000)
+            )
+            let events = try eventKit.events(matching: query)
+            return .json([
+                "events": events,
+                "count": events.count,
+                "range": ["start": DateParsing.format(start), "end": DateParsing.format(end)],
+            ])
+        }
+
+        router.get("/v1/calendars/events/:id") { request in
+            .json(["event": try eventKit.event(withIdentifier: try request.parameter("id"))])
+        }
+
+        router.post("/v1/calendars/events") { request in
+            let body = try request.jsonBody()
+            var draft = EventKitService.EventDraft()
+            draft.title = try body.nonEmptyString("title")
+            draft.start = try body.date("start")
+            draft.end = try body.optionalDate("end")
+            try applyCommonEventFields(&draft, from: body)
+            return .json(["event": try eventKit.createEvent(draft)], status: .created)
+        }
+
+        router.patch("/v1/calendars/events/:id") { request in
+            let body = try request.jsonBody()
+            var draft = EventKitService.EventDraft()
+            draft.title = try body.optionalString("title")
+            draft.start = try body.optionalDate("start")
+            draft.end = try body.optionalDate("end")
+            try applyCommonEventFields(&draft, from: body)
+            let event = try eventKit.updateEvent(
+                identifier: try request.parameter("id"),
+                draft: draft,
+                span: try span(from: body.raw["span"] as? String)
+            )
+            return .json(["event": event])
+        }
+
+        router.delete("/v1/calendars/events/:id") { request in
+            try eventKit.deleteEvent(
+                identifier: try request.parameter("id"),
+                span: try span(from: request.query["span"])
+            )
+            return .json(["deleted": true])
+        }
+    }
+
+    private func applyCommonEventFields(_ draft: inout EventKitService.EventDraft, from body: JSONBody) throws {
+        draft.isAllDay = try body.optionalBool("all_day")
+        draft.location = try body.optionalString("location")
+        draft.notes = try body.optionalString("notes")
+        draft.url = try body.optionalString("url")
+        draft.calendar = try body.optionalString("calendar")
+        draft.timeZone = try body.optionalString("time_zone")
+        draft.availability = try body.optionalString("availability")
+        if body.has("alarms_minutes_before") {
+            guard let raw = body.raw["alarms_minutes_before"] as? [Any] else {
+                throw APIError.badRequest("Field 'alarms_minutes_before' must be an array of numbers")
+            }
+            draft.alarms = try raw.map {
+                guard let number = $0 as? NSNumber else {
+                    throw APIError.badRequest("Field 'alarms_minutes_before' must contain only numbers")
+                }
+                return number.intValue
+            }
+        }
+    }
+
+    /// Recurring events need to say whether an edit hits one occurrence or the
+    /// whole series. Defaulting to `this_event` is the conservative choice.
+    private func span(from raw: String?) throws -> EKSpan {
+        switch raw?.lowercased() {
+        case nil, "", "this_event", "this": return .thisEvent
+        case "future_events", "future": return .futureEvents
+        default: throw APIError.badRequest("'span' must be 'this_event' or 'future_events'")
+        }
+    }
+
+    // MARK: - Reminders
+
+    private func registerReminders(_ router: Router) {
+        router.get("/v1/reminders/lists") { _ in
+            let lists = try eventKit.listCalendars(entity: .reminder)
+            return .json(["lists": lists, "count": lists.count])
+        }
+
+        router.get("/v1/reminders") { request in
+            let query = EventKitService.ReminderQuery(
+                lists: request.queryList("lists") ?? request.queryList("list"),
+                completed: try request.queryBool("completed"),
+                dueAfter: try request.queryDate("due_after"),
+                dueBefore: try request.queryDate("due_before"),
+                search: request.query["q"],
+                limit: min(try request.queryInt("limit") ?? 250, 1000)
+            )
+            let reminders = try eventKit.reminders(matching: query)
+            return .json(["reminders": reminders, "count": reminders.count])
+        }
+
+        router.post("/v1/reminders") { request in
+            let body = try request.jsonBody()
+            var draft = EventKitService.ReminderDraft()
+            draft.title = try body.nonEmptyString("title")
+            try applyCommonReminderFields(&draft, from: body)
+            return .json(["reminder": try eventKit.createReminder(draft)], status: .created)
+        }
+
+        router.patch("/v1/reminders/:id") { request in
+            let body = try request.jsonBody()
+            var draft = EventKitService.ReminderDraft()
+            draft.title = try body.optionalString("title")
+            try applyCommonReminderFields(&draft, from: body)
+            return .json(["reminder": try eventKit.updateReminder(identifier: try request.parameter("id"), draft: draft)])
+        }
+
+        // Completing is the single most common automation, so it gets a verb
+        // of its own rather than requiring a PATCH body.
+        router.post("/v1/reminders/:id/complete") { request in
+            var draft = EventKitService.ReminderDraft()
+            draft.completed = true
+            return .json(["reminder": try eventKit.updateReminder(identifier: try request.parameter("id"), draft: draft)])
+        }
+
+        router.delete("/v1/reminders/:id") { request in
+            try eventKit.deleteReminder(identifier: try request.parameter("id"))
+            return .json(["deleted": true])
+        }
+    }
+
+    private func applyCommonReminderFields(_ draft: inout EventKitService.ReminderDraft, from body: JSONBody) throws {
+        draft.notes = try body.optionalString("notes")
+        draft.list = try body.optionalString("list")
+        draft.due = try body.optionalDate("due")
+        draft.priority = try body.optionalInt("priority")
+        draft.completed = try body.optionalBool("completed")
+        draft.url = try body.optionalString("url")
+        // A bare `yyyy-MM-dd` due date means "that day", with no alarm time.
+        if let raw = try body.optionalString("due") {
+            draft.dueHasTime = raw.contains("T") || raw.contains(":")
+        }
+    }
+
+    // MARK: - Notes
+
+    private func registerNotes(_ router: Router) {
+        router.get("/v1/notes/folders") { _ in
+            let folders = try notes.listFolders()
+            return .json(["folders": folders, "count": folders.count])
+        }
+
+        router.get("/v1/notes") { request in
+            let items = try notes.listNotes(
+                folder: request.query["folder"],
+                search: request.query["q"],
+                limit: min(try request.queryInt("limit") ?? 50, 500),
+                includeBody: try request.queryBool("include_body") ?? false
+            )
+            return .json(["notes": items, "count": items.count])
+        }
+
+        router.get("/v1/notes/:id") { request in
+            .json(["note": try notes.note(id: try request.parameter("id"))])
+        }
+
+        router.post("/v1/notes") { request in
+            let body = try request.jsonBody()
+            let format = try body.optionalString("format")?.lowercased() ?? "text"
+            guard ["text", "html"].contains(format) else {
+                throw APIError.badRequest("Field 'format' must be 'text' or 'html'")
+            }
+            let note = try notes.createNote(
+                title: try body.nonEmptyString("title"),
+                body: try body.optionalString("body") ?? "",
+                folder: try body.optionalString("folder"),
+                isHTML: format == "html"
+            )
+            return .json(["note": note], status: .created)
+        }
+
+        router.patch("/v1/notes/:id") { request in
+            let body = try request.jsonBody()
+            var edit = NotesService.NoteEdit()
+            edit.body = try body.optionalString("body")
+            edit.append = try body.optionalString("append")
+            edit.prepend = try body.optionalString("prepend")
+            let format = try body.optionalString("format")?.lowercased() ?? "text"
+            guard ["text", "html"].contains(format) else {
+                throw APIError.badRequest("Field 'format' must be 'text' or 'html'")
+            }
+            edit.isHTML = format == "html"
+
+            guard edit.body != nil || edit.append != nil || edit.prepend != nil else {
+                throw APIError.badRequest("Provide at least one of 'body', 'append' or 'prepend'")
+            }
+            return .json(["note": try notes.updateNote(id: try request.parameter("id"), edit: edit)])
+        }
+
+        router.delete("/v1/notes/:id") { request in
+            try notes.deleteNote(id: try request.parameter("id"))
+            return .json(["deleted": true])
+        }
+    }
+}
+
+public enum BuildInfo {
+    public static let version = "1.0.0"
+}
