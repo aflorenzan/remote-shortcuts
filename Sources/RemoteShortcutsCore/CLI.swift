@@ -95,11 +95,16 @@ public enum CLI {
 
     // MARK: - init / token
 
-    static func initialise(force: Bool) -> Int32 {
+    /// `quiet` suppresses the summary — including the freshly generated token.
+    /// Tests run in CI, and a token echoed into a build log is a habit worth
+    /// not forming even when the token is throwaway.
+    static func initialise(force: Bool, quiet: Bool = false) -> Int32 {
         let file = ConfigPaths.configFile
         if FileManager.default.fileExists(atPath: file.path) && !force {
-            print("Config already exists at \(file.path)")
-            print("Run 'remote-shortcuts token show' to see the token, or pass --force to start over.")
+            if !quiet {
+                print("Config already exists at \(file.path)")
+                print("Run 'remote-shortcuts token show' to see the token, or pass --force to start over.")
+            }
             return 0
         }
 
@@ -123,6 +128,8 @@ public enum CLI {
             fail("Could not write \(file.path): \(error.localizedDescription)")
             return 73 // EX_CANTCREAT
         }
+
+        guard !quiet else { return 0 }
 
         print("Created \(file.path) (mode 600)")
         print("")

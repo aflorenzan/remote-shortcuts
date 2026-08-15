@@ -142,7 +142,8 @@ final class ConfigurationTests: XCTestCase {
 
     func testInitWritesConfigWithMode600() throws {
         try withConfigDir {
-            XCTAssertEqual(CLI.initialise(force: true), 0)
+            // quiet: the generated token must not land in the CI log.
+            XCTAssertEqual(CLI.initialise(force: true, quiet: true), 0)
         }
         let file = sandbox.appendingPathComponent("config.json")
         let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
