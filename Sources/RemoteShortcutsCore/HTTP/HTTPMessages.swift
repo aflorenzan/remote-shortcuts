@@ -148,7 +148,10 @@ public struct HTTPResponse {
         self.body = body
     }
 
-    public static func json(_ object: Any, status: HTTPStatus = .ok) -> HTTPResponse {
+    /// Typed as a dictionary rather than `Any` so every call site's literal has
+    /// a contextual type — otherwise each one warns that a heterogeneous
+    /// literal could only be inferred as `[String: Any]`.
+    public static func json(_ object: [String: Any], status: HTTPStatus = .ok) -> HTTPResponse {
         let data = (try? JSON.encode(object)) ?? Data(#"{"error":{"code":"internal_error","message":"Failed to encode response"}}"#.utf8)
         return HTTPResponse(status: status, headers: ["Content-Type": "application/json; charset=utf-8"], body: data)
     }
