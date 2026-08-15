@@ -216,6 +216,7 @@ private final class ConnectionHandler: @unchecked Sendable {
             switch host {
             case let .ipv4(address): return "\(address)".components(separatedBy: "%").first ?? "\(address)"
             case let .ipv6(address): return "\(address)".components(separatedBy: "%").first ?? "\(address)"
+            case let .name(name, _): return name
             @unknown default: return "unknown"
             }
         default:

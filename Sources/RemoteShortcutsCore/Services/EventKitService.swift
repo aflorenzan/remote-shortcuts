@@ -30,7 +30,9 @@ public final class EventKitService: @unchecked Sendable {
         case .denied: return .denied
         case .restricted: return .restricted
         case .notDetermined: return .notDetermined
-        @unknown default: return .denied
+        // Covers `.fullAccess` / `.writeOnly` (handled above on macOS 14+)
+        // and any case a future SDK adds.
+        default: return .denied
         }
     }
 
@@ -101,7 +103,7 @@ public final class EventKitService: @unchecked Sendable {
             "source": JSONValueOrNull(calendar.source?.title),
             "allows_modification": calendar.allowsContentModifications,
             "is_subscribed": calendar.isSubscribed,
-            "color": JSONValueOrNull(calendar.color.flatMap(EventKitService.hexString(from:))),
+            "color": JSONValueOrNull(calendar.cgColor.flatMap(EventKitService.hexString(from:))),
         ]
     }
 
@@ -116,6 +118,8 @@ public final class EventKitService: @unchecked Sendable {
         }
     }
 
+    /// EventKit hands back a `CGColor`; `EKCalendar.color` is an `NSColor` and
+    /// would drag AppKit into a background service for no reason.
     static func hexString(from color: CGColor) -> String? {
         guard let components = color.components, components.count >= 3 else { return nil }
         let r = Int((components[0] * 255).rounded())
