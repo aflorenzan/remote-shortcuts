@@ -1,0 +1,145 @@
+name: Release
+
+# Builds the release artefacts on a macOS runner from the tagged commit and
+# publishes them with a provenance attestation, so anyone can verify that the
+# tarball they downloaded was produced by this workflow from this source.
+#
+# Artefacts are a convenience. Building from source with scripts/install.sh
+# remains the path that requires trusting nothing but the repository.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - run: ./scripts/audit-dependencies.sh
+
+  release:
+    name: Build and publish
+    needs: audit
+    runs-on: macos-14
+    permissions:
+      contents: write      # create the release and upload assets
+      id-token: write      # sign the provenance attestation
+      attestations: write  # record it
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      # A tag whose version disagrees with the binary's would produce artefacts
+      # that misreport themselves, so fail here rather than ship that.
+      - name: Check the tag matches the source version
+        run: |
+          SOURCE_VERSION="$(sed -n 's/.*let version = "\(.*\)".*/\1/p' Sources/RemoteShortcutsCore/Routes/Routes.swift)"
+          PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          echo "tag=${{ steps.version.outputs.version }} source=${SOURCE_VERSION} plist=${PLIST_VERSION}"
+          if [[ "${SOURCE_VERSION}" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "::error::BuildInfo.version (${SOURCE_VERSION}) does not match tag ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+          if [[ "${PLIST_VERSION}" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "::error::Info.plist CFBundleShortVersionString (${PLIST_VERSION}) does not match tag"
+            exit 1
+          fi
+
+      - name: Test
+        run: swift test
+
+      - name: Package
+        run: ./scripts/package.sh "${{ steps.version.outputs.version }}"
+
+      - name: Smoke-test the packaged binary
+        run: |
+          BIN="dist/stage/RemoteShortcuts.app/Contents/MacOS/remote-shortcuts"
+          "$BIN" version
+          "$BIN" help > /dev/null
+          # doctor exits non-zero when permissions are missing, which they are
+          # on a runner; we only care that it runs and reports.
+          "$BIN" doctor || true
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@897ed5eab6ed058a474202017ada7f40bfa52940 # v1.4.3
+        with:
+          subject-path: dist/remote-shortcuts-*-macos-universal.tar.gz
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          NOTES_FILE="$(mktemp)"
+          {
+            echo "## Install"
+            echo
+            echo '```bash'
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/remote-shortcuts-${{ steps.version.outputs.version }}-macos-universal.tar.gz"
+            echo "curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/SHA256SUMS"
+            echo "shasum -a 256 -c SHA256SUMS"
+            echo "mkdir -p remote-shortcuts && tar -xzf remote-shortcuts-${{ steps.version.outputs.version }}-macos-universal.tar.gz -C remote-shortcuts"
+            echo "cd remote-shortcuts && ./install.sh"
+            echo '```'
+            echo
+            echo "Or build from source, which requires trusting nothing but this repository:"
+            echo
+            echo '```bash'
+            echo "git clone https://github.com/${GITHUB_REPOSITORY}.git"
+            echo "cd remote-shortcuts && git checkout ${TAG} && ./scripts/install.sh"
+            echo '```'
+            echo
+            echo "## Verify"
+            echo
+            echo "The tarball carries a build provenance attestation:"
+            echo
+            echo '```bash'
+            echo "gh attestation verify remote-shortcuts-${{ steps.version.outputs.version }}-macos-universal.tar.gz --repo ${GITHUB_REPOSITORY}"
+            echo '```'
+            echo
+            echo "The bundle inside is ad-hoc signed, not Developer ID signed, so"
+            echo "macOS will ask you to approve its privacy permissions on first run."
+            echo
+            echo "## Changes"
+            echo
+            # awk, not sed: a sed range never terminates on the last section of
+            # the file, so it would sweep up the link definitions at the bottom.
+            awk -v ver="${{ steps.version.outputs.version }}" '
+              $0 ~ "^## \\[" ver "\\]" { inside = 1; next }
+              inside && /^## \[/       { exit }
+              inside && /^\[[^]]+\]: / { next }
+              inside                   { print }
+            ' CHANGELOG.md
+          } > "${NOTES_FILE}"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/remote-shortcuts-*.tar.gz dist/SHA256SUMS --clobber
+            gh release edit "${TAG}" --notes-file "${NOTES_FILE}"
+          else
+            gh release create "${TAG}" \
+              dist/remote-shortcuts-*.tar.gz dist/SHA256SUMS \
+              --title "${TAG}" \
+              --notes-file "${NOTES_FILE}" \
+              --verify-tag
+          fi

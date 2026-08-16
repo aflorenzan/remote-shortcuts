@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the app bundle the installer assembles around the binary.
+
+  macOS attributes TCC permissions to a bundle, not to a loose executable, so
+  wrapping the binary in a .app is what makes the Calendars/Reminders/Automation
+  grants stick across restarts. The *UsageDescription strings below are what the
+  user reads in the permission prompt, so they say plainly what the server does.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>remote-shortcuts</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.remoteshortcuts.server</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Remote Shortcuts</string>
+    <key>CFBundleDisplayName</key>
+    <string>Remote Shortcuts</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Background service: no Dock icon, no menu bar. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSBackgroundOnly</key>
+    <false/>
+
+    <key>NSCalendarsUsageDescription</key>
+    <string>Remote Shortcuts reads and writes calendar events on behalf of the automations you send to its local webhook endpoint.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Remote Shortcuts reads and writes calendar events on behalf of the automations you send to its local webhook endpoint.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Remote Shortcuts reads, creates and completes reminders on behalf of the automations you send to its local webhook endpoint.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Remote Shortcuts reads, creates and completes reminders on behalf of the automations you send to its local webhook endpoint.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Remote Shortcuts controls Apple Notes and the Shortcuts app to read and write notes and run the shortcuts your automations request.</string>
+</dict>
+</plist>
