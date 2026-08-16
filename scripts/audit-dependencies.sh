@@ -94,12 +94,42 @@ else
     pass "No download-piped-to-shell patterns"
 fi
 
-# --- 5. Installer must not fetch anything ---------------------------------
+# --- 5. Installers must not fetch anything --------------------------------
+#
+# The release installer unpacks an already-downloaded tarball; neither
+# installer should reach the network except to health-check the local server.
 
-if grep -rnE '^[^#]*\b(curl|wget)\b' scripts/install.sh | grep -vE 'localhost|127\.0\.0\.1|\$\{ENDPOINT\}' >/dev/null 2>&1; then
-    fail "install.sh reaches out to the network"
-else
-    pass "install.sh only talks to the local server"
+NETWORK_CALLS=0
+for installer in scripts/install.sh scripts/install-release.sh; do
+    [[ -f "${installer}" ]] || continue
+    if grep -nE '^[^#]*\b(curl|wget)\b' "${installer}" \
+        | grep -vE 'localhost|127\.0\.0\.1|\$\{ENDPOINT\}' >/dev/null 2>&1; then
+        fail "${installer} reaches out to the network"
+        NETWORK_CALLS=$((NETWORK_CALLS + 1))
+    fi
+done
+if (( NETWORK_CALLS == 0 )); then
+    pass "Installers only talk to the local server"
+fi
+
+# --- 6. GitHub Actions pinned to commit SHAs ------------------------------
+#
+# A tag can be moved to point at new code; a 40-character SHA cannot. Actions
+# run with write access to this repository during releases, so they get the
+# same pinning rule as everything else.
+
+UNPINNED=0
+if [[ -d .github/workflows ]]; then
+    while IFS= read -r line; do
+        [[ -z "${line}" ]] && continue
+        if ! echo "${line}" | grep -qE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$|#)'; then
+            fail "Action not pinned to a commit SHA: ${line#*:}"
+            UNPINNED=$((UNPINNED + 1))
+        fi
+    done < <(grep -rhnE '^[[:space:]]*(-[[:space:]]*)?uses:' .github/workflows/ 2>/dev/null || true)
+fi
+if (( UNPINNED == 0 )); then
+    pass "All GitHub Actions pinned to commit SHAs"
 fi
 
 echo

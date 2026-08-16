@@ -31,11 +31,37 @@ The reason this is written in Swift with no packages:
 | **No install-time downloads** | `scripts/install.sh` fetches nothing. It compiles the source in the checkout with the toolchain already on the machine. |
 | **No `curl \| bash`** | There is no remote install one-liner, and the audit script fails if one appears. You clone, read, then run. |
 | **No build plugins or codegen** | Nothing executes at build time beyond the Swift compiler. |
-| **Pinned CI actions** | GitHub Actions are pinned to full commit SHAs, not floating tags. |
-| **Reproducible from source** | The binary you run is built on your machine from the code in the repo. No release artefact to be tampered with. |
+| **Pinned CI actions** | GitHub Actions are pinned to full 40-character commit SHAs, not floating tags — and the audit script fails the build if an unpinned `uses:` appears. |
+| **Buildable from source** | `scripts/install.sh` compiles on your machine from the code in the repo. This is the path that requires trusting nothing else. |
 
 The practical consequence: the set of code that runs inside a process holding
 your Calendar and Reminders grants is *this repository plus macOS itself*.
+
+### Release artefacts
+
+Releases also carry a prebuilt tarball, because "clone and compile" is a poor
+answer for someone who just wants the thing running. That artefact is a second
+trust path, so it is built to be checkable rather than taken on faith:
+
+- Built by `.github/workflows/release.yml` on a GitHub-hosted macOS runner,
+  from the tagged commit, using the same `scripts/package.sh` you can run
+  yourself.
+- Published with a **build provenance attestation**, so you can confirm the
+  tarball came from that workflow and that source:
+  ```bash
+  gh attestation verify remote-shortcuts-<version>-macos-universal.tar.gz \
+     --repo aflorenzan/remote-shortcuts
+  ```
+- Published with `SHA256SUMS`, and the release workflow runs the supply-chain
+  audit before it builds anything.
+- The app bundle is **ad-hoc signed**, not Developer ID signed. That proves the
+  bundle has not been altered since it was built; it does not attest to who
+  built it. The attestation is what does that.
+- The release installer verifies the signature before copying anything into
+  place, and refuses to continue if the check fails.
+
+If you would rather not trust a prebuilt binary at all, build from source. Both
+paths produce the same app bundle.
 
 ## Network and authentication
 
