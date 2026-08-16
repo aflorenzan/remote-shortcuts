@@ -123,8 +123,14 @@ jobs:
             echo
             echo "## Changes"
             echo
-            sed -n "/^## \[${{ steps.version.outputs.version }}\]/,/^## \[/p" CHANGELOG.md \
-              | sed '$d' | tail -n +2
+            # awk, not sed: a sed range never terminates on the last section of
+            # the file, so it would sweep up the link definitions at the bottom.
+            awk -v ver="${{ steps.version.outputs.version }}" '
+              $0 ~ "^## \\[" ver "\\]" { inside = 1; next }
+              inside && /^## \[/       { exit }
+              inside && /^\[[^]]+\]: / { next }
+              inside                   { print }
+            ' CHANGELOG.md
           } > "${NOTES_FILE}"
 
           if gh release view "${TAG}" >/dev/null 2>&1; then

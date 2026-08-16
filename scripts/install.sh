@@ -80,7 +80,9 @@ if grep -qE '^\s*\.package\(' Package.swift; then
     die "Package.swift declares an external dependency. This project must stay dependency-free — refusing to build."
 fi
 
-swift build -c release --disable-sandbox 2>&1 | sed 's/^/    /'
+# No --disable-sandbox: this package has no build plugins, so the sandbox costs
+# nothing and keeps the promise that installing runs nothing untrusted.
+swift build -c release 2>&1 | sed 's/^/    /'
 BINARY="$(swift build -c release --show-bin-path)/remote-shortcuts"
 [[ -x "${BINARY}" ]] || die "Build finished but ${BINARY} is missing."
 

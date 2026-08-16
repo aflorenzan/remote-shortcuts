@@ -100,14 +100,25 @@ struct HTTPParser {
 
     // MARK: - Pieces
 
+    static let headerTerminator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+
+    /// Finds the end of the header block.
+    ///
+    /// This runs on every `receive()`, before authentication, so its cost is
+    /// something an anonymous client controls. `Data.range(of:)` searches in
+    /// place; the hand-rolled loop it replaced copied the whole buffer and
+    /// allocated a four-byte array per byte scanned, which made a body
+    /// delivered in small chunks quadratic and trivially CPU-exhausting.
+    ///
+    /// No incremental scan offset is needed on top of that. Once the headers
+    /// are complete the search stops at the terminator near the front of the
+    /// buffer regardless of how much body has arrived behind it, and while the
+    /// headers are still incomplete the scan is bounded by the 32 KB header cap
+    /// enforced immediately below.
     static func findHeaderTerminator(in buffer: Data) -> Int? {
-        let pattern: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A] // \r\n\r\n
-        guard buffer.count >= pattern.count else { return nil }
-        let bytes = [UInt8](buffer)
-        for index in 0...(bytes.count - pattern.count) where Array(bytes[index..<index + pattern.count]) == pattern {
-            return index
-        }
-        return nil
+        guard buffer.count >= headerTerminator.count else { return nil }
+        guard let found = buffer.range(of: headerTerminator) else { return nil }
+        return buffer.distance(from: buffer.startIndex, to: found.lowerBound)
     }
 
     static func parseRequestLine(_ line: String) throws -> (method: String, target: String, version: String) {

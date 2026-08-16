@@ -129,6 +129,36 @@ final class HTTPParserTests: XCTestCase {
         XCTAssertFalse(request.keepAlive)
     }
 
+    /// Regression test for a CPU-exhaustion bug: the header scan used to copy
+    /// the whole buffer and allocate per byte, so a body delivered in small
+    /// chunks made parsing quadratic — reachable before authentication.
+    ///
+    /// Re-parsing after every chunk of a 512 KB body has to stay comfortably
+    /// fast. The old implementation took minutes here; the fix takes
+    /// milliseconds, so the threshold is loose enough not to be flaky on a
+    /// loaded CI machine while still failing loudly if the bug returns.
+    func testRepeatedParsingOfAChunkedBodyStaysFast() throws {
+        let bodySize = 512 * 1024
+        let header = "POST /v1/notes HTTP/1.1\r\nContent-Length: \(bodySize)\r\n\r\n"
+        let subject = parser(maxBody: bodySize)
+
+        var buffer = data(header)
+        let chunk = Data(repeating: 0x61, count: 4096)
+
+        let started = Date()
+        while buffer.count < header.utf8.count + bodySize {
+            buffer.append(chunk)
+            _ = try subject.parse(buffer)
+        }
+        let elapsed = Date().timeIntervalSince(started)
+
+        guard case .complete(let request, _) = try subject.parse(buffer) else {
+            return XCTFail("Expected the request to complete")
+        }
+        XCTAssertEqual(request.body.count, bodySize)
+        XCTAssertLessThan(elapsed, 5.0, "Header scanning appears to be super-linear again")
+    }
+
     func testConnectionCloseIsHonoured() throws {
         let raw = "GET /v1/health HTTP/1.1\r\nConnection: close\r\n\r\n"
         guard case let .complete(request, _) = try parser().parse(data(raw)) else {

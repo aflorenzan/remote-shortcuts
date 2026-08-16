@@ -57,9 +57,11 @@ chmod 755 "${STAGE}/install.sh" "${STAGE}/uninstall.sh"
 
 TARBALL="${DIST}/remote-shortcuts-${VERSION}-macos-universal.tar.gz"
 info "Creating $(basename "${TARBALL}")"
-# --no-mac-metadata keeps AppleDouble files out of the archive so the checksum
-# does not depend on extended attributes of the build machine.
-tar --no-mac-metadata --no-xattrs -czf "${TARBALL}" -C "${STAGE}" .
+# COPYFILE_DISABLE keeps AppleDouble (._*) entries out of the archive, so the
+# checksum does not depend on extended attributes of the build machine. It is
+# preferred over tar's --no-mac-metadata because an unrecognised flag would
+# abort the release after the build and signing have already succeeded.
+COPYFILE_DISABLE=1 tar -czf "${TARBALL}" -C "${STAGE}" .
 
 info "Writing checksums"
 (cd "${DIST}" && shasum -a 256 "$(basename "${TARBALL}")" > SHA256SUMS)
