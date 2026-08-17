@@ -252,7 +252,20 @@ public final class EventKitService: @unchecked Sendable {
         let reference = EventReference.parse(raw)
 
         if let event = store.event(withIdentifier: raw) {
-            return ResolvedEvent(event: event, pinnedToOccurrence: reference.isOccurrencePinned)
+            guard let wantedStart = reference.occurrenceStart else {
+                return ResolvedEvent(event: event, pinnedToOccurrence: false)
+            }
+            // Do not take the lookup's word for it. If EventKit accepts its own
+            // composite format loosely and hands back the series master,
+            // treating that as a pinned occurrence would skip the staleness
+            // checks below and write to the wrong occurrence — reintroducing
+            // exactly the silent no-op and resurrection this is meant to fix.
+            // Confirm it starts where the id says; otherwise fall through and
+            // locate the occurrence properly.
+            let actualStart = event.startDate ?? .distantPast
+            if abs(actualStart.timeIntervalSince(wantedStart)) < 1 {
+                return ResolvedEvent(event: event, pinnedToOccurrence: true)
+            }
         }
 
         guard let start = reference.occurrenceStart else {

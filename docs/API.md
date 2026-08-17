@@ -188,6 +188,9 @@ Each occurrence of a series comes back with its own `id`, in the composite form
 }
 ```
 
+`series_id` is present on every event, recurring or not; on a one-off it equals
+`id`, so a client formatting a mixed list needs no special case.
+
 Send the composite `id` back and `span` acts from **that occurrence**:
 
 | `span` | With a composite id | With a bare `series_id` |
