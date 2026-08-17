@@ -273,6 +273,24 @@ final class NotesConversionTests: XCTestCase {
         let error = NotesService.translate(stderr: "execution error: REMOTE_SHORTCUTS_NOT_FOUND (-1728)", exitCode: 1)
         XCTAssertEqual(error.status, .notFound)
     }
+
+    /// A bare -1728 is AppleScript failing to read a property — our fault, not
+    /// a missing item. Mapping it to 404 is what disguised a total failure of
+    /// `GET /v1/notes` as "folder not found".
+    func testBareScriptingErrorIsNotReportedAsNotFound() {
+        let error = NotesService.translate(
+            stderr: "execution error: Can't get id of {note id \"x-coredata://…\"}. (-1728)",
+            exitCode: 1
+        )
+        XCTAssertEqual(error.status, .badGateway)
+        XCTAssertTrue(error.message.contains("-1728"))
+        XCTAssertTrue(error.message.contains("Can't get id"), "The real AppleScript message must survive for diagnosis")
+    }
+
+    func testFallbackDetailIsExtracted() {
+        let detail = NotesService.fallbackDetail("RS_BULK_FALLBACK Can't get id of {…}\nother noise")
+        XCTAssertEqual(detail, "Can't get id of {…}")
+    }
 }
 
 final class ShortcutsServiceTests: XCTestCase {
