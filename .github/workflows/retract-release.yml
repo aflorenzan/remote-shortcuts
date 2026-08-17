@@ -1,0 +1,97 @@
+name: Retract release assets
+
+# Removes the downloadable artefacts from a release and replaces its notes with
+# a warning, without deleting the release or its tag.
+#
+# This exists because v1.0.0 shipped a signed universal binary that could not
+# start: the listener was handed its port twice and failed EINVAL on any host
+# but 0.0.0.0, which is every default install. Leaving a broken binary
+# downloadable is worse than having no binary, and deleting the release outright
+# would erase the record that it happened.
+#
+# The tag and the release page stay. Only the assets go.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the release to retract (e.g. v1.0.0)"
+        required: true
+      reason:
+        description: "One line explaining why, shown on the release page"
+        required: true
+      superseded_by:
+        description: "Tag that replaces it, if any (e.g. v1.1.0)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  retract:
+    name: Retract ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Retract the assets and mark the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          REASON: ${{ inputs.reason }}
+          SUPERSEDED_BY: ${{ inputs.superseded_by }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "::error::No release tagged ${TAG}"
+            exit 1
+          fi
+
+          echo "Assets currently attached to ${TAG}:"
+          gh release view "${TAG}" --json assets \
+            --jq '.assets[].name' | sed 's/^/  /' || echo "  (none)"
+
+          # Delete every asset. --yes because there is no terminal here.
+          while read -r asset; do
+            [[ -z "${asset}" ]] && continue
+            echo "Deleting ${asset}"
+            gh release delete-asset "${TAG}" "${asset}" --yes
+          done < <(gh release view "${TAG}" --json assets --jq '.assets[].name')
+
+          NOTES_FILE="$(mktemp)"
+          {
+            echo "> [!CAUTION]"
+            echo "> **The artefacts for this release have been withdrawn.**"
+            echo ">"
+            echo "> ${REASON}"
+            if [[ -n "${SUPERSEDED_BY}" ]]; then
+              echo ">"
+              echo "> Use [${SUPERSEDED_BY}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${SUPERSEDED_BY}) instead."
+            fi
+            echo
+            echo "The tag and this page are kept so the history stays honest. To build"
+            echo "this version from source anyway:"
+            echo
+            echo '```bash'
+            echo "git clone https://github.com/${GITHUB_REPOSITORY}.git"
+            echo "cd remote-shortcuts && git checkout ${TAG} && ./scripts/install.sh"
+            echo '```'
+            echo
+            echo "---"
+            echo
+            echo "### Original release notes"
+            echo
+            gh release view "${TAG}" --json body --jq '.body'
+          } > "${NOTES_FILE}"
+
+          # Pre-release so it stops being served as "latest".
+          gh release edit "${TAG}" \
+            --notes-file "${NOTES_FILE}" \
+            --prerelease
+
+          echo
+          echo "Remaining assets on ${TAG}:"
+          gh release view "${TAG}" --json assets --jq '.assets | length'

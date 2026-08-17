@@ -37,6 +37,8 @@ jobs:
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       version: ${{ steps.resolve.outputs.version }}
+      core_version: ${{ steps.resolve.outputs.core_version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -63,6 +65,18 @@ jobs:
             echo "::error::'${VERSION}' is not a semantic version"
             exit 1
           fi
+
+          # A pre-release tag (v1.1.0-rc.1) ships the 1.1.0 binary, so the
+          # version baked into the source is compared against the core version
+          # and the release is flagged so it does not become "latest".
+          CORE_VERSION="${VERSION%%-*}"
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+          echo "core_version=${CORE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
 
           if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "Tag ${TAG} already exists at $(git rev-parse --short "refs/tags/${TAG}")"
@@ -98,6 +112,8 @@ jobs:
     env:
       TAG: ${{ needs.tag.outputs.tag }}
       VERSION: ${{ needs.tag.outputs.version }}
+      CORE_VERSION: ${{ needs.tag.outputs.core_version }}
+      PRERELEASE: ${{ needs.tag.outputs.prerelease }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -110,13 +126,13 @@ jobs:
         run: |
           SOURCE_VERSION="$(sed -n 's/.*let version = "\(.*\)".*/\1/p' Sources/RemoteShortcutsCore/Routes/Routes.swift)"
           PLIST_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
-          echo "tag=${VERSION} source=${SOURCE_VERSION} plist=${PLIST_VERSION}"
-          if [[ "${SOURCE_VERSION}" != "${VERSION}" ]]; then
-            echo "::error::BuildInfo.version (${SOURCE_VERSION}) does not match tag ${VERSION}"
+          echo "tag=${VERSION} core=${CORE_VERSION} source=${SOURCE_VERSION} plist=${PLIST_VERSION}"
+          if [[ "${SOURCE_VERSION}" != "${CORE_VERSION}" ]]; then
+            echo "::error::BuildInfo.version (${SOURCE_VERSION}) does not match tag core version ${CORE_VERSION}"
             exit 1
           fi
-          if [[ "${PLIST_VERSION}" != "${VERSION}" ]]; then
-            echo "::error::Info.plist CFBundleShortVersionString (${PLIST_VERSION}) does not match tag ${VERSION}"
+          if [[ "${PLIST_VERSION}" != "${CORE_VERSION}" ]]; then
+            echo "::error::Info.plist CFBundleShortVersionString (${PLIST_VERSION}) does not match tag core version ${CORE_VERSION}"
             exit 1
           fi
 
@@ -147,6 +163,17 @@ jobs:
           TARBALL="remote-shortcuts-${VERSION}-macos-universal.tar.gz"
           NOTES_FILE="$(mktemp)"
           {
+            if [[ "${PRERELEASE}" == "true" ]]; then
+              echo "> [!WARNING]"
+              echo "> **Pre-release.** These artefacts start and pass the full CI suite,"
+              echo "> including a smoke test that boots the server over TCP — but the"
+              echo "> EventKit, Notes and Shortcuts paths have not yet been verified"
+              echo "> against real data on a Mac. That verification is in progress."
+              echo ">"
+              echo "> Use this to test. Wait for the stable ${CORE_VERSION} release before"
+              echo "> pointing a production automation at it."
+              echo
+            fi
             echo "## Install"
             echo
             echo '```bash'
@@ -179,7 +206,7 @@ jobs:
             echo
             # awk, not sed: a sed range never terminates on the last section of
             # the file, so it would sweep up the link definitions at the bottom.
-            awk -v ver="${VERSION}" '
+            awk -v ver="${CORE_VERSION}" '
               $0 ~ "^## \\[" ver "\\]" { inside = 1; next }
               inside && /^## \[/       { exit }
               inside && /^\[[^]]+\]: / { next }
@@ -191,9 +218,12 @@ jobs:
             gh release upload "${TAG}" "dist/${TARBALL}" dist/SHA256SUMS --clobber
             gh release edit "${TAG}" --notes-file "${NOTES_FILE}"
           else
+            EXTRA=()
+            [[ "${PRERELEASE}" == "true" ]] && EXTRA+=(--prerelease)
             gh release create "${TAG}" \
               "dist/${TARBALL}" dist/SHA256SUMS \
               --title "${TAG}" \
               --notes-file "${NOTES_FILE}" \
-              --verify-tag
+              --verify-tag \
+              "${EXTRA[@]}"
           fi
