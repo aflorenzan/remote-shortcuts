@@ -92,6 +92,9 @@ BINARY="$(swift build -c release --show-bin-path)/remote-shortcuts"
 # permissions off a bundle identifier and code signature. A bare executable
 # gets re-prompted or silently denied after every rebuild.
 
+REINSTALL=0
+[[ -d "${APP_DIR}" ]] && REINSTALL=1
+
 info "Assembling ${APP_DIR}"
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS"
@@ -99,11 +102,14 @@ cp "${REPO_ROOT}/Resources/Info.plist" "${APP_DIR}/Contents/Info.plist"
 cp "${BINARY}" "${APP_DIR}/Contents/MacOS/remote-shortcuts"
 chmod 755 "${APP_DIR}/Contents/MacOS/remote-shortcuts"
 
-# Ad-hoc signature with a stable identifier so the permission grants survive
-# reinstalls. A paid Developer ID is not required for local use.
+# Ad-hoc signature with a stable identifier. Note what this does NOT buy:
+# without a Team ID, TCC indexes the grant by CDHash, and the CDHash changes on
+# every build. So Calendars/Reminders permissions must be granted again after a
+# rebuild. (Apple Events, oddly, tends to survive.) Signing with a Developer ID
+# certificate is what makes them persist — see README.
 info "Signing the bundle (ad-hoc)"
 codesign --force --sign - --identifier "${BUNDLE_ID}" "${APP_DIR}" 2>&1 | sed 's/^/    /' || \
-    warn "codesign failed; macOS may re-ask for permissions after each rebuild."
+    warn "codesign failed; the bundle may not be able to hold privacy permissions at all."
 
 APP_BINARY="${APP_DIR}/Contents/MacOS/remote-shortcuts"
 
@@ -221,6 +227,18 @@ $(printf '\033[1;32mInstalled.\033[0m')
   From n8n, use an HTTP Request node with a Header Auth credential:
     Name: Authorization    Value: Bearer ${TOKEN}
 
+$(if (( REINSTALL == 1 )); then cat <<'REGRANT'
+  ⚠️  You reinstalled over an existing bundle. Because the signature is ad-hoc,
+      its code hash changed and macOS treats it as a new app, so Calendars and
+      Reminders permissions have to be granted again:
+
+        remote-shortcuts preflight     # re-request them, then approve
+        remote-shortcuts doctor        # confirm
+
+      Until then those endpoints return 403 after a 60-second prompt wait.
+
+REGRANT
+fi)
   Manage the service:
     launchctl kickstart -k gui/\$(id -u)/${BUNDLE_ID}   # restart
     remote-shortcuts doctor                            # diagnose

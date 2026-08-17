@@ -314,4 +314,14 @@ Appending a line to a running log:
 ```
 
 ### `DELETE /v1/notes/:id`
-Moves the note to *Recently Deleted*, the same as deleting it in the app.
+
+Moves the note to *Recently Deleted*, exactly as deleting it in the app does.
+
+**The id keeps resolving afterwards.** `GET /v1/notes/:id` on a deleted note
+still returns `200` with its content, for roughly 30 days, until Notes purges
+the trash. The folder's `note_count` drops immediately and the note stops
+appearing in `GET /v1/notes`.
+
+That is Notes' own semantics and this API does not hide it: a client that can
+still read a deleted note can tell "deleted, recoverable" from "never existed",
+and nothing here can empty the trash on your behalf.

@@ -315,29 +315,40 @@ private enum Scripts {
     end run
     """
 
-    /// Folders are walked by index so `container of folder i` resolves. Reading
-    /// it off a `repeat with f in folders` reference fails with -1728, which is
-    /// why every nested folder used to report `account: ""`.
+    /// Enumerates folders per account.
+    ///
+    /// `container of folder i` fails on nested folders, and the `try` around it
+    /// swallowed the error — which is why 35 of 43 folders reported
+    /// `account: ""`, exactly the nested ones. Even when it does resolve, a
+    /// nested folder's container is its *parent folder*, not the account, so it
+    /// was the wrong value anyway.
+    ///
+    /// `folders of account a` returns every folder including nested ones, so the
+    /// account is known without walking a container chain. Verified on a real
+    /// Mac: 43 folders, all with an account, and faster than the old form.
     static let listFolders = """
     \(prelude)
     on run argv
         set output to ""
         tell application "Notes"
-            set folderCount to (count of folders)
+            set accountCount to (count of accounts)
         end tell
 
-        repeat with i from 1 to folderCount
+        repeat with a from 1 to accountCount
             tell application "Notes"
-                set folderID to ((id of folder i) as text)
-                set folderName to ((name of folder i) as text)
-                set noteTotal to ((count of notes of folder i) as text)
-                set accountName to ""
-                try
-                    set accountName to ((name of container of folder i) as text)
-                end try
+                set accountName to ((name of account a) as text)
+                set folderCount to (count of folders of account a)
             end tell
-            set output to output & folderID & fieldSep & folderName & fieldSep & ¬
-                noteTotal & fieldSep & accountName & recordSep
+
+            repeat with i from 1 to folderCount
+                tell application "Notes"
+                    set folderID to ((id of folder i of account a) as text)
+                    set folderName to ((name of folder i of account a) as text)
+                    set noteTotal to ((count of notes of folder i of account a) as text)
+                end tell
+                set output to output & folderID & fieldSep & folderName & fieldSep & ¬
+                    noteTotal & fieldSep & accountName & recordSep
+            end repeat
         end repeat
         return output
     end run
@@ -345,8 +356,32 @@ private enum Scripts {
 
     /// argv: 1 folder filter (may be ""), 2 search text (may be ""),
     ///       3 limit, 4 "1" to include the HTML body.
+    ///
+    /// ## `a reference to` is the load-bearing part
+    ///
+    /// `set candidates to notes of folder i` *materialises* the plural into a
+    /// list of individual references, and AppleScript will not map a property
+    /// over a list — `id of candidates` then fails with
+    /// "Can't get id of {note id …, note id …}" (-1728).
+    ///
+    /// Addressing the folder by index was necessary but not sufficient; what
+    /// broke the bulk fetch was assigning the plural to a variable.
+    /// `a reference to` keeps it a specifier. Measured on a real 389-note
+    /// folder: without it the bulk failed and the request timed out past 30s;
+    /// with it, 389 ids in 0.30s.
+    ///
+    /// ## Bodies are requested separately
+    ///
+    /// `body of candidates` in bulk works to at least 55 notes and fails at 389
+    /// with -1741 — a limit on the *size* of the Apple Event reply, not the
+    /// count. So bodies get their own `try`: a failure there degrades only the
+    /// bodies, and the per-note fallback walks just the notes about to be
+    /// emitted, so its cost is bounded by `limit` rather than by folder size.
+    /// Bodies are opt-in (`include_body`) and `limit` defaults to 50, which
+    /// keeps the common case comfortably inside the bulk path.
     static let listNotes = """
     \(prelude)
+
     on run argv
         set folderFilter to item 1 of argv
         set searchText to item 2 of argv
@@ -358,75 +393,106 @@ private enum Scripts {
         set matchedFolder to false
 
         tell application "Notes"
-            set folderCount to (count of folders)
-            set folderNames to {}
-            if folderCount > 0 then set folderNames to (name of folders)
+            set accountCount to (count of accounts)
         end tell
 
-        repeat with i from 1 to folderCount
+        repeat with a from 1 to accountCount
             if emitted < maxCount then
-                set folderName to ((item i of folderNames) as text)
+                tell application "Notes"
+                    set folderCount to (count of folders of account a)
+                    set folderNames to {}
+                    if folderCount > 0 then set folderNames to (name of folders of account a)
+                end tell
 
-                if (folderFilter is "") or (folderName is folderFilter) then
-                    set matchedFolder to true
+                repeat with i from 1 to folderCount
+                    if emitted < maxCount then
+                        set folderName to ((item i of folderNames) as text)
 
-                    tell application "Notes"
-                        if searchText is not "" then
-                            set candidates to (notes of folder i whose name contains searchText)
-                        else
-                            set candidates to notes of folder i
-                        end if
-                        set noteCount to (count of candidates)
-                    end tell
+                        if (folderFilter is "") or (folderName is folderFilter) then
+                            set matchedFolder to true
 
-                    if noteCount > 0 then
-                        set idList to {}
-                        set nameList to {}
-                        set createdList to {}
-                        set modifiedList to {}
-                        set bodyList to {}
-
-                        try
-                            -- Bulk: a handful of Apple Events for the whole
-                            -- folder instead of four per note.
                             tell application "Notes"
-                                set idList to (id of candidates)
-                                set nameList to (name of candidates)
-                                set createdList to (creation date of candidates)
-                                set modifiedList to (modification date of candidates)
-                                if wantBody then set bodyList to (body of candidates)
+                                if searchText is not "" then
+                                    set candidates to a reference to (notes of folder i of account a whose name contains searchText)
+                                else
+                                    set candidates to a reference to (notes of folder i of account a)
+                                end if
+                                set noteCount to (count of candidates)
                             end tell
-                        on error bulkError
-                            log "RS_BULK_FALLBACK " & bulkError
-                            set idList to {}
-                            set nameList to {}
-                            set createdList to {}
-                            set modifiedList to {}
-                            set bodyList to {}
-                            tell application "Notes"
-                                repeat with n in candidates
-                                    set end of idList to ((id of n) as text)
-                                    set end of nameList to ((name of n) as text)
-                                    set end of createdList to (creation date of n)
-                                    set end of modifiedList to (modification date of n)
-                                    if wantBody then set end of bodyList to ((body of n) as text)
+
+                            if noteCount > 0 then
+                                set idList to {}
+                                set nameList to {}
+                                set createdList to {}
+                                set modifiedList to {}
+
+                                try
+                                    tell application "Notes"
+                                        set idList to (id of candidates)
+                                        set nameList to (name of candidates)
+                                        set createdList to (creation date of candidates)
+                                        set modifiedList to (modification date of candidates)
+                                    end tell
+                                on error bulkError
+                                    log "RS_BULK_FALLBACK properties: " & bulkError
+                                    set idList to {}
+                                    set nameList to {}
+                                    set createdList to {}
+                                    set modifiedList to {}
+                                    tell application "Notes"
+                                        repeat with n in candidates
+                                            set end of idList to ((id of n) as text)
+                                            set end of nameList to ((name of n) as text)
+                                            set end of createdList to (creation date of n)
+                                            set end of modifiedList to (modification date of n)
+                                        end repeat
+                                    end tell
+                                end try
+
+                                set wanted to (count of idList)
+                                if (emitted + wanted) > maxCount then set wanted to (maxCount - emitted)
+
+                                -- Bodies are asked for separately, with their own
+                                -- try, so an oversized reply (-1741, a limit on
+                                -- Apple Event *size* — reproduced at 389 notes,
+                                -- fine at 55) cannot drag the ids and dates onto
+                                -- the slow path with it.
+                                --
+                                -- The per-note fallback walks only the notes
+                                -- about to be emitted, so its cost is bounded by
+                                -- `limit` rather than by the size of the folder.
+                                set bodyList to {}
+                                if wantBody and wanted > 0 then
+                                    try
+                                        tell application "Notes"
+                                            set bodyList to (body of candidates)
+                                        end tell
+                                    on error bodyError
+                                        log "RS_BULK_FALLBACK bodies: " & bodyError
+                                        set bodyList to {}
+                                        tell application "Notes"
+                                            repeat with k from 1 to wanted
+                                                set end of bodyList to ((body of (item k of candidates)) as text)
+                                            end repeat
+                                        end tell
+                                    end try
+                                end if
+
+                                repeat with k from 1 to wanted
+                                    set bodyField to ""
+                                    if wantBody and (k ≤ (count of bodyList)) then
+                                        set bodyField to ((item k of bodyList) as text)
+                                    end if
+                                    set output to output & ((item k of idList) as text) & fieldSep & ¬
+                                        ((item k of nameList) as text) & fieldSep & folderName & fieldSep & ¬
+                                        my isoDate(item k of createdList) & fieldSep & ¬
+                                        my isoDate(item k of modifiedList) & fieldSep & bodyField & recordSep
+                                    set emitted to emitted + 1
                                 end repeat
-                            end tell
-                        end try
-
-                        repeat with k from 1 to (count of idList)
-                            if emitted < maxCount then
-                                set bodyField to ""
-                                if wantBody then set bodyField to ((item k of bodyList) as text)
-                                set output to output & ((item k of idList) as text) & fieldSep & ¬
-                                    ((item k of nameList) as text) & fieldSep & folderName & fieldSep & ¬
-                                    my isoDate(item k of createdList) & fieldSep & ¬
-                                    my isoDate(item k of modifiedList) & fieldSep & bodyField & recordSep
-                                set emitted to emitted + 1
                             end if
-                        end repeat
+                        end if
                     end if
-                end if
+                end repeat
             end if
         end repeat
 
@@ -435,14 +501,19 @@ private enum Scripts {
         end if
         return output
     end run
-    """
+
 
     /// argv: 1 note id.
     ///
-    /// Resolves through `note id X`, which is a real specifier, so `container`
-    /// resolves off it. The `whose` form is kept as a fallback but cannot report
-    /// the containing folder — that is why created notes used to come back with
-    /// `folder: ""`.
+    /// The folder is found by scanning, not by reading `container`.
+    ///
+    /// `container of <note>` fails the same way `container of folder i` does, and
+    /// the `try` around it swallowed the error — which is why `POST /v1/notes`
+    /// and `GET /v1/notes/:id` reported `folder: ""` while the list endpoint,
+    /// which knows the folder because it iterated to it, reported it correctly.
+    ///
+    /// Scanning is affordable now that ids come back in bulk: one request per
+    /// folder, and it stops at the first match.
     static let getNote = """
     \(prelude)
     on run argv
@@ -464,18 +535,49 @@ private enum Scripts {
                 set theNote to item 1 of matches
             end if
 
-            set folderName to ""
-            try
-                set folderName to ((name of container of theNote) as text)
-            end try
-
-            return ((id of theNote) as text) & fieldSep & ((name of theNote) as text) & fieldSep & ¬
-                folderName & fieldSep & my isoDate(creation date of theNote) & fieldSep & ¬
-                my isoDate(modification date of theNote) & fieldSep & ¬
-                ((body of theNote) as text) & fieldSep & ((plaintext of theNote) as text) & recordSep
+            set noteName to ((name of theNote) as text)
+            set noteBody to ((body of theNote) as text)
+            set notePlain to ((plaintext of theNote) as text)
+            set createdAt to (creation date of theNote)
+            set modifiedAt to (modification date of theNote)
         end tell
+
+        set folderName to my folderContaining(noteID)
+
+        return noteID & fieldSep & noteName & fieldSep & folderName & fieldSep & ¬
+            my isoDate(createdAt) & fieldSep & my isoDate(modifiedAt) & fieldSep & ¬
+            noteBody & fieldSep & notePlain & recordSep
     end run
-    """
+
+    on folderContaining(noteID)
+        tell application "Notes"
+            set accountCount to (count of accounts)
+        end tell
+
+        repeat with a from 1 to accountCount
+            tell application "Notes"
+                set folderCount to (count of folders of account a)
+                set folderNames to {}
+                if folderCount > 0 then set folderNames to (name of folders of account a)
+            end tell
+
+            repeat with i from 1 to folderCount
+                tell application "Notes"
+                    set idList to {}
+                    try
+                        set idList to (id of (a reference to (notes of folder i of account a)))
+                    end try
+                end tell
+                repeat with candidateID in idList
+                    if ((candidateID as text) is noteID) then
+                        return ((item i of folderNames) as text)
+                    end if
+                end repeat
+            end repeat
+        end repeat
+
+        return ""
+    end folderContaining
 
     /// argv: 1 title (unused by Notes but kept for clarity), 2 HTML body,
     ///       3 folder name (may be "" for the default folder).
