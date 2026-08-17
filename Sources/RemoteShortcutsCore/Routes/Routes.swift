@@ -104,12 +104,24 @@ public struct RouteBuilder {
             case .restricted: return "restricted"
             }
         }
-        return [
-            "calendars": describe(EventKitService.authorisationStatus(for: .event)),
-            "reminders": describe(EventKitService.authorisationStatus(for: .reminder)),
+
+        let calendars = eventKit.effectiveAccess(for: .event)
+        let reminders = eventKit.effectiveAccess(for: .reminder)
+
+        var report: [String: Any] = [
+            "calendars": describe(calendars),
+            "reminders": describe(reminders),
             "shortcuts_cli": ShortcutsService.isAvailable() ? "available" : "missing",
             "notes_app": NotesService.isAvailable() ? "available" : "missing",
         ]
+
+        // `not_determined` is the one status a caller cannot act on without
+        // knowing what it means, so say it rather than leaving them to guess
+        // that TCC has failed.
+        if calendars == .notDetermined || reminders == .notDetermined {
+            report["note"] = "'not_determined' means this process has not been asked for that permission yet, not that it was refused. Run 'remote-shortcuts preflight' from a terminal to request it."
+        }
+        return report
     }
 
     // MARK: - Shortcuts

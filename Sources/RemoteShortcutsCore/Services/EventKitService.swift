@@ -63,9 +63,29 @@ public final class EventKitService: @unchecked Sendable {
         return granted
     }
 
+    /// The status TCC reports, corrected by what the process can actually do.
+    ///
+    /// `authorizationStatus(for:)` keeps saying `notDetermined` after the user
+    /// has granted access, until this process exercises that access for the
+    /// first time. A permissions endpoint that reports it raw therefore claims
+    /// nothing is granted right up until some other call proves otherwise,
+    /// which reads as "TCC is broken" when everything is fine.
+    ///
+    /// `calendars(for:)` never prompts and returns an empty array without
+    /// access, so it is a safe probe for a read-only endpoint to make.
+    public func effectiveAccess(for entity: EKEntityType) -> Access {
+        let declared = EventKitService.authorisationStatus(for: entity)
+        guard declared == .notDetermined else { return declared }
+
+        let visible = (try? sync { store in store.calendars(for: entity).count }) ?? 0
+        return visible > 0 ? .granted : .notDetermined
+    }
+
     private func requireAccess(_ entity: EKEntityType) throws {
         let service = entity == .event ? "Calendars" : "Reminders"
-        switch EventKitService.authorisationStatus(for: entity) {
+        // Effective, not declared: otherwise a granted-but-not-yet-exercised
+        // permission sends every first request into a 60-second prompt wait.
+        switch effectiveAccess(for: entity) {
         case .granted:
             return
         case .notDetermined:
