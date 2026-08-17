@@ -16,7 +16,7 @@ import Foundation
 /// which keeps parsing unambiguous without asking AppleScript to emit JSON.
 public final class NotesService: @unchecked Sendable {
     private static let osascript = "/usr/bin/osascript"
-    private static let fieldSeparator = "\u{001F}"
+    static let fieldSeparator = "\u{001F}"
     private static let recordSeparator = "\u{001E}"
 
     /// Serialised: AppleScript sends Apple Events to a single-threaded app, so
@@ -166,8 +166,14 @@ public final class NotesService: @unchecked Sendable {
         }
     }
 
-    public func note(id: String) throws -> [String: Any] {
-        let output = try run(Scripts.getNote, [id])
+    /// `folderHint` skips the folder scan.
+    ///
+    /// Finding the folder means walking every folder comparing ids, which costs
+    /// roughly as much as `GET /v1/notes/folders` (~2.4s on a 43-folder
+    /// library). `createNote` already knows the folder, so making it pay that
+    /// again would have doubled the cost of a create for no information.
+    public func note(id: String, folderHint: String? = nil) throws -> [String: Any] {
+        let output = try run(Scripts.getNote, [id, folderHint ?? ""])
         guard let record = NotesService.parseRecords(output).first else {
             throw APIError.notFound("No note with id '\(id)'")
         }
@@ -190,11 +196,16 @@ public final class NotesService: @unchecked Sendable {
         // the title is prepended as a heading rather than set as a property.
         let document = "<h1>\(NotesService.escapeHTML(title))</h1>\n\(html)"
         let output = try run(Scripts.createNote, [title, document, folder ?? ""])
-        let identifier = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The script returns "<id><FS><folder it used>", so the folder is known
+        // without scanning for it.
+        let parts = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: NotesService.fieldSeparator)
+        let identifier = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !identifier.isEmpty else {
             throw APIError.upstreamFailure("Apple Notes did not return an id for the new note")
         }
-        return try note(id: identifier)
+        let createdIn = parts.count > 1 ? parts[1] : (folder ?? "")
+        return try note(id: identifier, folderHint: createdIn.isEmpty ? nil : createdIn)
     }
 
     public struct NoteEdit {
@@ -518,6 +529,8 @@ private enum Scripts {
     \(prelude)
     on run argv
         set noteID to item 1 of argv
+        set folderHint to ""
+        if (count of argv) > 1 then set folderHint to item 2 of argv
 
         tell application "Notes"
             set resolved to false
@@ -542,7 +555,11 @@ private enum Scripts {
             set modifiedAt to (modification date of theNote)
         end tell
 
-        set folderName to my folderContaining(noteID)
+        if folderHint is not "" then
+            set folderName to folderHint
+        else
+            set folderName to my folderContaining(noteID)
+        end if
 
         return noteID & fieldSep & noteName & fieldSep & folderName & fieldSep & ¬
             my isoDate(createdAt) & fieldSep & my isoDate(modifiedAt) & fieldSep & ¬
@@ -604,10 +621,15 @@ private enum Scripts {
                     error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
                 end if
                 set newNote to make new note at folder targetIndex with properties {body:noteBody}
+                set usedFolder to folderName
             else
                 set newNote to make new note with properties {body:noteBody}
+                set usedFolder to ""
+                try
+                    set usedFolder to ((name of container of newNote) as text)
+                end try
             end if
-            return ((id of newNote) as text)
+            return ((id of newNote) as text) & fieldSep & usedFolder
         end tell
     end run
     """
