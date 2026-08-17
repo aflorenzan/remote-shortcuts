@@ -147,6 +147,12 @@ public struct RouteBuilder {
         // Convenience form so an n8n HTTP node can put the name in the URL.
         router.post("/v1/shortcuts/:name/run") { request in
             let body = (try? request.jsonBody()) ?? JSONBody([:])
+            // `name` comes from the path here, so a body `name` would be a
+            // second, possibly contradictory source. Reject rather than guess.
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.shortcutFields.subtracting(["name"]),
+                unsupported: ["name": "the shortcut name comes from the URL on this endpoint. Use POST /v1/shortcuts/run to pass it in the body."]
+            )
             return try runShortcut(name: try request.parameter("name"), body: body)
         }
     }
@@ -182,10 +188,14 @@ public struct RouteBuilder {
     // A field name that is merely recognisable — `attendees` — gets an
     // explanation instead of a bare "unknown".
 
-    private static let eventFields: Set<String> = [
+    private static let eventCreateFields: Set<String> = [
         "title", "start", "end", "all_day", "location", "notes", "url",
-        "calendar", "time_zone", "availability", "alarms_minutes_before", "span",
+        "calendar", "time_zone", "availability", "alarms_minutes_before",
     ]
+
+    /// Only the update path reads `span`. Sharing one set with create would
+    /// accept and ignore it there — the very bug this validation removes.
+    private static let eventUpdateFields: Set<String> = eventCreateFields.union(["span"])
 
     private static let unsupportedEventFields: [String: String] = [
         "attendees": "EventKit exposes attendees as read-only, so invitees cannot be set through this API. Create the event and invite people from Calendar, or use a shortcut.",
@@ -236,7 +246,7 @@ public struct RouteBuilder {
         router.post("/v1/calendars/events") { request in
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
-                allowed: RouteBuilder.eventFields,
+                allowed: RouteBuilder.eventCreateFields,
                 unsupported: RouteBuilder.unsupportedEventFields
             )
             var draft = EventKitService.EventDraft()
@@ -250,7 +260,7 @@ public struct RouteBuilder {
         router.patch("/v1/calendars/events/:id") { request in
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
-                allowed: RouteBuilder.eventFields,
+                allowed: RouteBuilder.eventUpdateFields,
                 unsupported: RouteBuilder.unsupportedEventFields
             )
             var draft = EventKitService.EventDraft()

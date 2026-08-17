@@ -158,6 +158,36 @@ final class RouterTests: XCTestCase {
         }
     }
 
+    /// When an exact route matches, a greedy route never runs for that path, so
+    /// `Allow` must not advertise the greedy route's method.
+    func testAllowHeaderDoesNotAdvertiseUnreachableGreedyMethods() throws {
+        let router = Router()
+        router.get("/v1/notes/folders") { _ in .json(["kind": "folders"]) }
+        router.delete("/v1/notes/:id") { _ in .json(["deleted": true]) }
+
+        let response = try router.handle(
+            HTTPRequest(method: "POST", path: "/v1/notes/folders"),
+            readOnly: false
+        )
+        XCTAssertEqual(response.status, .methodNotAllowed)
+        XCTAssertEqual(response.headers["Allow"], "GET, HEAD")
+    }
+
+    /// Registration order is preserved inside each group, so a static route
+    /// registered after a greedy one still wins.
+    func testExactRouteWinsEvenWhenRegisteredAfterTheGreedyOne() throws {
+        let router = Router()
+        router.get("/v1/notes/:id") { _ in .json(["kind": "note"]) }
+        router.get("/v1/notes/folders") { _ in .json(["kind": "folders"]) }
+
+        let response = try router.handle(
+            HTTPRequest(method: "GET", path: "/v1/notes/folders"),
+            readOnly: false
+        )
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["kind"] as? String, "folders")
+    }
+
     func testHEADReturnsHeadersWithoutBody() throws {
         let router = Router()
         router.get("/v1/health") { _ in .json(["ok": true]) }

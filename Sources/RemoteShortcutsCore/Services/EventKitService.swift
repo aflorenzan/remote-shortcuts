@@ -303,7 +303,8 @@ public final class EventKitService: @unchecked Sendable {
             // Same phantom as in `deleteEvent`, with a nastier outcome: saving
             // the resolved master with `.thisEvent` makes EventKit
             // re-materialise an occurrence the user had already deleted.
-            if span == .thisEvent, !self.occurrenceExists(EventKitService.OccurrenceRef(event), in: store) {
+            let target = EventKitService.OccurrenceRef(event)
+            if target.isRecurring, span == .thisEvent, !self.occurrenceExists(target, in: store) {
                 throw APIError.notFound(
                     "The occurrence this id points at no longer exists — it was already deleted or detached from the series. Editing it would recreate it. Query GET /v1/calendars/events to get a current id."
                 )
@@ -346,8 +347,14 @@ public final class EventKitService: @unchecked Sendable {
             // the occurrence it points at has already been detached or
             // deleted. Removing that phantom silently succeeds, and reporting
             // a deletion that did not happen is worse than any error.
+            // Recurring events only. For a one-off, the identifier lookup above
+            // already proved it exists, and gating an ordinary delete on a
+            // post-hoc identifier lookup would risk reporting failure for a
+            // deletion that succeeded — that path already worked.
             let target = EventKitService.OccurrenceRef(event)
-            if span == .thisEvent, !self.occurrenceExists(target, in: store) {
+            let needsOccurrenceCheck = target.isRecurring && span == .thisEvent
+
+            if needsOccurrenceCheck, !self.occurrenceExists(target, in: store) {
                 throw APIError.notFound(
                     "The occurrence this id points at no longer exists — it was already deleted or detached from the series. Query GET /v1/calendars/events to get a current id."
                 )
@@ -359,9 +366,9 @@ public final class EventKitService: @unchecked Sendable {
                 throw APIError.upstreamFailure("Calendar rejected the deletion: \(error.localizedDescription)")
             }
 
-            // Confirm something actually went away rather than trusting that
-            // `remove` not throwing means it did.
-            if span == .thisEvent, self.occurrenceExists(target, in: store) {
+            // Confirm the occurrence actually went away rather than trusting
+            // that `remove` not throwing means it did.
+            if needsOccurrenceCheck, self.occurrenceExists(target, in: store) {
                 throw APIError.upstreamFailure(
                     "Calendar accepted the deletion but the occurrence is still present. Nothing was deleted."
                 )
