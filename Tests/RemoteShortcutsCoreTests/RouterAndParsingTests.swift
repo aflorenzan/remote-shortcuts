@@ -325,3 +325,62 @@ final class ShortcutsServiceTests: XCTestCase {
         XCTAssertFalse(ShortcutsService.looksLikeJSON("plain text"))
     }
 }
+
+/// A typo used to produce the wrong object with a 201. `due_date` instead of
+/// `due` created a reminder with no due date at all.
+final class UnknownFieldRejectionTests: XCTestCase {
+    private let reminderFields: Set<String> = ["title", "notes", "list", "due", "priority", "completed", "url"]
+
+    func testAcceptsKnownFields() {
+        let body = JSONBody(["title": "Call the bank", "due": "2026-12-01", "priority": 1])
+        XCTAssertNoThrow(try body.rejectUnknownFields(allowed: reminderFields))
+    }
+
+    func testRejectsUnknownFieldAndSuggestsTheRealOne() {
+        let body = JSONBody(["title": "x", "due_date": "2026-12-01T10:00:00-04:00"])
+        XCTAssertThrowsError(try body.rejectUnknownFields(allowed: reminderFields)) { error in
+            guard let apiError = error as? APIError else { return XCTFail("Expected APIError") }
+            XCTAssertEqual(apiError.status, .badRequest)
+            XCTAssertTrue(apiError.message.contains("due_date"), apiError.message)
+            XCTAssertTrue(apiError.message.contains("'due'"), apiError.message)
+        }
+    }
+
+    func testExplainsFieldsThatCannotBeWritten() {
+        let body = JSONBody(["title": "x", "attendees": ["a@b.com"]])
+        XCTAssertThrowsError(try body.rejectUnknownFields(
+            allowed: ["title", "start"],
+            unsupported: ["attendees": "EventKit exposes attendees as read-only."]
+        )) { error in
+            let message = (error as? APIError)?.message ?? ""
+            XCTAssertTrue(message.contains("attendees"), message)
+            XCTAssertTrue(message.contains("read-only"), "Should say why, not just 'unknown': \(message)")
+        }
+    }
+
+    func testListsEveryUnknownField() {
+        let body = JSONBody(["nope": 1, "alsoNope": 2])
+        XCTAssertThrowsError(try body.rejectUnknownFields(allowed: reminderFields)) { error in
+            let message = (error as? APIError)?.message ?? ""
+            XCTAssertTrue(message.contains("nope"), message)
+            XCTAssertTrue(message.contains("alsoNope"), message)
+        }
+    }
+
+    func testNullValuedUnknownFieldIsStillRejected() {
+        let body = JSONBody(["title": "x", "bogus": NSNull()])
+        XCTAssertThrowsError(try body.rejectUnknownFields(allowed: reminderFields))
+    }
+
+    func testEditDistance() {
+        XCTAssertEqual(JSONBody.editDistance("due", "due"), 0)
+        XCTAssertEqual(JSONBody.editDistance("titel", "title"), 2)
+        XCTAssertEqual(JSONBody.editDistance("", "abc"), 3)
+    }
+
+    func testClosestMatchPrefersPrefixMatches() {
+        XCTAssertEqual(JSONBody.closestMatch(to: "due_date", in: reminderFields), "due")
+        XCTAssertEqual(JSONBody.closestMatch(to: "titel", in: reminderFields), "title")
+        XCTAssertNil(JSONBody.closestMatch(to: "zzzzzzzz", in: reminderFields))
+    }
+}

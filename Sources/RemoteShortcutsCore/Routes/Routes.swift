@@ -128,6 +128,7 @@ public struct RouteBuilder {
         // though it reads like a lookup.
         router.post("/v1/shortcuts/run") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.shortcutFields)
             return try runShortcut(name: try body.nonEmptyString("name"), body: body)
         }
 
@@ -163,6 +164,31 @@ public struct RouteBuilder {
         return .json(payload)
     }
 
+    // MARK: - Accepted fields
+    //
+    // Anything not listed here is rejected with a 400 rather than dropped.
+    // A field name that is merely recognisable — `attendees` — gets an
+    // explanation instead of a bare "unknown".
+
+    private static let eventFields: Set<String> = [
+        "title", "start", "end", "all_day", "location", "notes", "url",
+        "calendar", "time_zone", "availability", "alarms_minutes_before", "span",
+    ]
+
+    private static let unsupportedEventFields: [String: String] = [
+        "attendees": "EventKit exposes attendees as read-only, so invitees cannot be set through this API. Create the event and invite people from Calendar, or use a shortcut.",
+        "organizer": "EventKit exposes the organizer as read-only.",
+        "recurrence": "Recurrence rules cannot be set through this API yet. Create the series in Calendar and edit occurrences here.",
+    ]
+
+    private static let reminderFields: Set<String> = [
+        "title", "notes", "list", "due", "priority", "completed", "url",
+    ]
+
+    private static let noteCreateFields: Set<String> = ["title", "body", "format", "folder"]
+    private static let noteUpdateFields: Set<String> = ["body", "append", "prepend", "format"]
+    private static let shortcutFields: Set<String> = ["name", "input", "timeout"]
+
     // MARK: - Calendars
 
     private func registerCalendars(_ router: Router) {
@@ -197,6 +223,10 @@ public struct RouteBuilder {
 
         router.post("/v1/calendars/events") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.eventFields,
+                unsupported: RouteBuilder.unsupportedEventFields
+            )
             var draft = EventKitService.EventDraft()
             draft.title = try body.nonEmptyString("title")
             draft.start = try body.date("start")
@@ -207,6 +237,10 @@ public struct RouteBuilder {
 
         router.patch("/v1/calendars/events/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.eventFields,
+                unsupported: RouteBuilder.unsupportedEventFields
+            )
             var draft = EventKitService.EventDraft()
             draft.title = try body.optionalString("title")
             draft.start = try body.optionalDate("start")
@@ -283,6 +317,7 @@ public struct RouteBuilder {
 
         router.post("/v1/reminders") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
             draft.title = try body.nonEmptyString("title")
             try applyCommonReminderFields(&draft, from: body)
@@ -291,6 +326,7 @@ public struct RouteBuilder {
 
         router.patch("/v1/reminders/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
             draft.title = try body.optionalString("title")
             try applyCommonReminderFields(&draft, from: body)
@@ -348,6 +384,7 @@ public struct RouteBuilder {
 
         router.post("/v1/notes") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.noteCreateFields)
             let format = try body.optionalString("format")?.lowercased() ?? "text"
             guard ["text", "html"].contains(format) else {
                 throw APIError.badRequest("Field 'format' must be 'text' or 'html'")
@@ -363,6 +400,7 @@ public struct RouteBuilder {
 
         router.patch("/v1/notes/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.noteUpdateFields)
             var edit = NotesService.NoteEdit()
             edit.body = try body.optionalString("body")
             edit.append = try body.optionalString("append")
