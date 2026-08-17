@@ -50,8 +50,13 @@ public enum HTTPStatus: Int {
 
 public struct HTTPRequest {
     public let method: String
-    /// Path with percent-escapes already decoded, query string removed.
-    public let path: String
+    /// Path split into segments, each percent-decoded on its own.
+    ///
+    /// Segments rather than a string because routing on a rejoined path cannot
+    /// tell a separator the client sent from one that came out of a `%2F`, and
+    /// because rejoining loses the empty segment in the middle of an id like
+    /// `x-coredata://…/ICNote/p123`.
+    public let segments: [String]
     public let query: [String: String]
     /// Header names are lower-cased; repeated headers are joined with ", ".
     public let headers: [String: String]
@@ -61,9 +66,12 @@ public struct HTTPRequest {
     /// Path parameters filled in by the router (e.g. `:id`).
     public var parameters: [String: String] = [:]
 
+    /// Human-readable path, for logs and error messages only. Never route on it.
+    public var path: String { HTTPParser.renderPath(segments) }
+
     public init(
         method: String,
-        path: String,
+        segments: [String],
         query: [String: String],
         headers: [String: String],
         body: Data,
@@ -72,13 +80,34 @@ public struct HTTPRequest {
         parameters: [String: String] = [:]
     ) {
         self.method = method
-        self.path = path
+        self.segments = segments
         self.query = query
         self.headers = headers
         self.body = body
         self.remoteAddress = remoteAddress
         self.keepAlive = keepAlive
         self.parameters = parameters
+    }
+
+    /// Convenience for call sites that have a literal path (tests, mostly).
+    public init(
+        method: String,
+        path: String,
+        query: [String: String] = [:],
+        headers: [String: String] = [:],
+        body: Data = Data(),
+        remoteAddress: String = "127.0.0.1",
+        keepAlive: Bool = true
+    ) {
+        self.init(
+            method: method,
+            segments: (try? HTTPParser.pathSegments(of: path)) ?? [],
+            query: query,
+            headers: headers,
+            body: body,
+            remoteAddress: remoteAddress,
+            keepAlive: keepAlive
+        )
     }
 
     public func jsonBody() throws -> JSONBody {

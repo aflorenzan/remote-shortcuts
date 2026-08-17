@@ -105,10 +105,28 @@ final class HTTPParserTests: XCTestCase {
         XCTAssertEqual(request.path, "/v1/shortcuts/Daily Briefing/run")
     }
 
-    func testNormalisesTrailingAndDuplicateSlashes() {
-        XCTAssertEqual(HTTPParser.normalisePath("/v1/notes/"), "/v1/notes")
-        XCTAssertEqual(HTTPParser.normalisePath("//v1//notes//"), "/v1/notes")
-        XCTAssertEqual(HTTPParser.normalisePath("/"), "/")
+    func testDropsLeadingAndTrailingEmptySegments() throws {
+        XCTAssertEqual(try HTTPParser.pathSegments(of: "/v1/notes/"), ["v1", "notes"])
+        XCTAssertEqual(try HTTPParser.pathSegments(of: "/v1/notes"), ["v1", "notes"])
+        XCTAssertEqual(try HTTPParser.pathSegments(of: "/"), [])
+    }
+
+    /// The empty segment in the middle is the whole point: it is what makes
+    /// `x-coredata://…` survive routing intact.
+    func testPreservesInternalEmptySegments() throws {
+        XCTAssertEqual(
+            try HTTPParser.pathSegments(of: "/v1/notes/x-coredata://UUID/ICNote/p1"),
+            ["v1", "notes", "x-coredata:", "", "UUID", "ICNote", "p1"]
+        )
+    }
+
+    /// Each segment is decoded on its own, so `%2F` stays inside its segment
+    /// instead of becoming a separator.
+    func testPercentEncodedSlashDoesNotBecomeASeparator() throws {
+        XCTAssertEqual(
+            try HTTPParser.pathSegments(of: "/v1/notes/a%2Fb"),
+            ["v1", "notes", "a/b"]
+        )
     }
 
     func testPipelinedRequestsAreConsumedOneAtATime() throws {

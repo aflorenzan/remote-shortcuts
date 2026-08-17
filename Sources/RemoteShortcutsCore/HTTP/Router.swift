@@ -10,6 +10,11 @@ public final class Router {
         let handler: Handler
         /// Mutating routes are blocked when the server runs in read-only mode.
         let mutating: Bool
+
+        /// A route whose last segment is a parameter captures everything left
+        /// in the path, so `/v1/notes/:id` matches an id containing slashes —
+        /// which every Apple Notes id does (`x-coredata://…/ICNote/p123`).
+        var hasGreedyTail: Bool { segments.last?.hasPrefix(":") ?? false }
     }
 
     private var routes: [Route] = []
@@ -38,10 +43,14 @@ public final class Router {
     }
 
     public func handle(_ request: HTTPRequest, readOnly: Bool) throws -> HTTPResponse {
-        let requestSegments = request.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let requestSegments = request.segments
         var pathMatched = false
 
-        for route in routes {
+        // Two passes: exact-arity matches first, greedy trailing-parameter
+        // matches second. Without that ordering `/v1/reminders/:id` would
+        // swallow `/v1/reminders/<id>/complete`, since a greedy `:id` happily
+        // absorbs the trailing `complete`.
+        for route in routes.filter({ !$0.hasGreedyTail }) + routes.filter({ $0.hasGreedyTail }) {
             guard let parameters = match(route: route, against: requestSegments) else { continue }
             pathMatched = true
             guard route.method == request.method else { continue }
@@ -58,9 +67,11 @@ public final class Router {
         // HEAD is answered as a GET with the body stripped, which keeps health
         // probes and uptime monitors working.
         if request.method == "HEAD" {
+            // Rebuild from segments, not from the rendered path: round-tripping
+            // through a string is exactly what this fix exists to avoid.
             let asGet = HTTPRequest(
                 method: "GET",
-                path: request.path,
+                segments: request.segments,
                 query: request.query,
                 headers: request.headers,
                 body: request.body,
@@ -89,12 +100,29 @@ public final class Router {
     }
 
     private func match(route: Route, against segments: [String]) -> [String: String]? {
-        guard route.segments.count == segments.count else { return nil }
+        if route.hasGreedyTail {
+            guard segments.count >= route.segments.count else { return nil }
+        } else {
+            guard route.segments.count == segments.count else { return nil }
+        }
+
         var parameters: [String: String] = [:]
-        for (pattern, actual) in zip(route.segments, segments) {
+        for (index, pattern) in route.segments.enumerated() {
+            let isLast = index == route.segments.count - 1
+
             if pattern.hasPrefix(":") {
-                parameters[String(pattern.dropFirst())] = actual
-            } else if pattern != actual {
+                let name = String(pattern.dropFirst())
+                if isLast {
+                    // Rejoin the remainder with "/" so an id that contained
+                    // slashes — or an empty segment, as `x-coredata://` does —
+                    // comes back out exactly as the client sent it.
+                    let tail = segments[index...].joined(separator: "/")
+                    guard !tail.isEmpty else { return nil }
+                    parameters[name] = tail
+                } else {
+                    parameters[name] = segments[index]
+                }
+            } else if pattern != segments[index] {
                 return nil
             }
         }

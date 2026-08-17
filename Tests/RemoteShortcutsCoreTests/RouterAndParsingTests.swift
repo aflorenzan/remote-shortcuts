@@ -3,15 +3,7 @@ import XCTest
 
 final class RouterTests: XCTestCase {
     private func request(_ method: String, _ path: String) -> HTTPRequest {
-        HTTPRequest(
-            method: method,
-            path: path,
-            query: [:],
-            headers: [:],
-            body: Data(),
-            remoteAddress: "127.0.0.1",
-            keepAlive: true
-        )
+        HTTPRequest(method: method, path: path)
     }
 
     func testMatchesStaticRoute() throws {
@@ -71,6 +63,99 @@ final class RouterTests: XCTestCase {
         let router = Router()
         router.get("/v1/notes") { _ in .json(["ok": true]) }
         XCTAssertEqual(try router.handle(request("GET", "/v1/notes"), readOnly: true).status, .ok)
+    }
+
+    // MARK: - Ids containing slashes
+    //
+    // Apple Notes ids look like `x-coredata://UUID/ICNote/p4102` and are minted
+    // by this API, so a client has no choice but to send them back. Before
+    // these tests the parser percent-decoded the whole path before splitting
+    // and the router collapsed `//`, which made every one of those ids
+    // unroutable — the notes module had no working read path at all.
+
+    private let noteID = "x-coredata://1008047F-DEAD-BEEF/ICNote/p4102"
+
+    func testMatchesIdContainingDoubleSlash() throws {
+        let router = Router()
+        router.get("/v1/notes/:id") { request in
+            .json(["id": try request.parameter("id")])
+        }
+
+        let request = HTTPRequest(method: "GET", path: "/v1/notes/\(noteID)")
+        let response = try router.handle(request, readOnly: false)
+        XCTAssertEqual(response.status, .ok)
+
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["id"] as? String, noteID)
+    }
+
+    func testMatchesPercentEncodedId() throws {
+        let router = Router()
+        router.get("/v1/notes/:id") { request in
+            .json(["id": try request.parameter("id")])
+        }
+
+        let encoded = "x-coredata%3A%2F%2F1008047F-DEAD-BEEF%2FICNote%2Fp4102"
+        let request = HTTPRequest(method: "GET", path: "/v1/notes/\(encoded)")
+        let response = try router.handle(request, readOnly: false)
+        XCTAssertEqual(response.status, .ok)
+
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["id"] as? String, noteID)
+    }
+
+    func testMatchesDetachedOccurrenceId() throws {
+        let router = Router()
+        router.delete("/v1/calendars/events/:id") { request in
+            .json(["id": try request.parameter("id")])
+        }
+
+        let occurrence = "330D65C2-0000-1111/RID=825598800"
+        let request = HTTPRequest(method: "DELETE", path: "/v1/calendars/events/\(occurrence)")
+        let response = try router.handle(request, readOnly: false)
+
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["id"] as? String, occurrence)
+    }
+
+    /// A greedy `:id` must not eat a more specific route that lives underneath
+    /// it — the exact-arity pass has to win.
+    func testGreedyIdDoesNotSwallowNestedRoute() throws {
+        let router = Router()
+        router.patch("/v1/reminders/:id") { _ in .json(["route": "patch"]) }
+        router.post("/v1/reminders/:id/complete") { _ in .json(["route": "complete"]) }
+
+        let response = try router.handle(
+            HTTPRequest(method: "POST", path: "/v1/reminders/abc-123/complete"),
+            readOnly: false
+        )
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["route"] as? String, "complete")
+    }
+
+    func testStaticRouteStillWinsOverGreedyId() throws {
+        let router = Router()
+        router.get("/v1/notes/folders") { _ in .json(["kind": "folders"]) }
+        router.get("/v1/notes/:id") { _ in .json(["kind": "note"]) }
+
+        let response = try router.handle(
+            HTTPRequest(method: "GET", path: "/v1/notes/folders"),
+            readOnly: false
+        )
+        let payload = try JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        XCTAssertEqual(payload?["kind"] as? String, "folders")
+    }
+
+    func testGreedyIdDoesNotMatchMissingId() {
+        let router = Router()
+        router.get("/v1/notes/:id") { _ in .json(["kind": "note"]) }
+
+        XCTAssertThrowsError(try router.handle(
+            HTTPRequest(method: "GET", path: "/v1/notes"),
+            readOnly: false
+        )) { error in
+            XCTAssertEqual((error as? APIError)?.status, .notFound)
+        }
     }
 
     func testHEADReturnsHeadersWithoutBody() throws {
