@@ -315,6 +315,10 @@ public enum CLI {
             switch status {
             case .granted:
                 print("  \(label): granted ✓")
+            case .writeOnly:
+                print("  \(label): write-only ✗ — can create but not read.")
+                print("    Grant full access: System Settings → Privacy & Security → \(label)")
+                problems += 1
             case .notDetermined:
                 print("  \(label): not requested yet — run 'remote-shortcuts preflight'")
                 problems += 1

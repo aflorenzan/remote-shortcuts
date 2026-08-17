@@ -69,7 +69,17 @@ No auth. `{"status":"ok","version":"1.0.0","time":"…"}`.
   }
 }
 ```
-Calendar/Reminders values: `granted`, `denied`, `not_determined`, `restricted`.
+Calendar/Reminders values:
+
+| Value | Meaning |
+| --- | --- |
+| `granted` | Full access — reads and writes work |
+| `write_only` | macOS allows creating items but not reading them. **Reads are refused with `403 permission_denied`** rather than returning empty results, because a write-only grant makes `GET` succeed with nothing in it — indistinguishable from "nothing scheduled" |
+| `denied` | Refused; re-enable in System Settings |
+| `not_determined` | This process has not asked yet. Run `remote-shortcuts preflight` |
+| `restricted` | Blocked by device policy |
+
+A `note` field appears alongside when a value needs explaining.
 
 ---
 

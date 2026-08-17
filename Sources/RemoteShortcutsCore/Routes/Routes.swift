@@ -99,6 +99,7 @@ public struct RouteBuilder {
         func describe(_ access: EventKitService.Access) -> String {
             switch access {
             case .granted: return "granted"
+            case .writeOnly: return "write_only"
             case .denied: return "denied"
             case .notDetermined: return "not_determined"
             case .restricted: return "restricted"
@@ -120,6 +121,9 @@ public struct RouteBuilder {
         // that TCC has failed.
         if calendars == .notDetermined || reminders == .notDetermined {
             report["note"] = "'not_determined' means this process has not been asked for that permission yet, not that it was refused. Run 'remote-shortcuts preflight' from a terminal to request it."
+        }
+        if calendars == .writeOnly || reminders == .writeOnly {
+            report["note"] = "'write_only' means macOS allows creating items but not reading them. Reads are refused rather than returning empty results. Grant full access in System Settings → Privacy & Security."
         }
         return report
     }

@@ -188,7 +188,9 @@ public struct HTTPResponse {
     public static func error(_ error: APIError) -> HTTPResponse {
         var payload: [String: Any] = ["code": error.code, "message": error.message]
         if let hint = error.hint { payload["hint"] = hint }
-        return .json(["error": payload], status: error.status)
+        var response = HTTPResponse.json(["error": payload], status: error.status)
+        response.headers.merge(error.headers) { _, new in new }
+        return response
     }
 
     public static let noContent = HTTPResponse(status: .noContent)

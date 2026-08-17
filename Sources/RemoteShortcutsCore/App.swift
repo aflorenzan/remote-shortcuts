@@ -116,7 +116,10 @@ public final class App: @unchecked Sendable {
 
     private func enforceRateLimit(_ request: HTTPRequest) throws {
         if let retryAfter = rateLimiter.consume(key: request.remoteAddress) {
-            throw APIError.tooManyRequests("Rate limit of \(configuration.rateLimitPerMinute) requests/minute exceeded. Retry in \(retryAfter)s.")
+            throw APIError.tooManyRequests(
+                "Rate limit of \(configuration.rateLimitPerMinute) requests/minute exceeded. Retry in \(retryAfter)s.",
+                retryAfterSeconds: retryAfter
+            )
         }
     }
 

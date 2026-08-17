@@ -11,7 +11,7 @@ public enum APIError: Error, CustomStringConvertible {
     case notFound(String)
     case methodNotAllowed(String)
     case payloadTooLarge(String)
-    case tooManyRequests(String)
+    case tooManyRequests(String, retryAfterSeconds: Int)
     case unprocessable(String)
     case timeout(String)
     case permissionDenied(service: String, detail: String)
@@ -55,8 +55,10 @@ public enum APIError: Error, CustomStringConvertible {
     public var message: String {
         switch self {
         case let .badRequest(m), let .unauthorized(m), let .forbidden(m), let .notFound(m),
-             let .methodNotAllowed(m), let .payloadTooLarge(m), let .tooManyRequests(m),
+             let .methodNotAllowed(m), let .payloadTooLarge(m),
              let .unprocessable(m), let .timeout(m), let .upstreamFailure(m), let .internalError(m):
+            return m
+        case let .tooManyRequests(m, _):
             return m
         case let .permissionDenied(service, detail):
             return "macOS has not granted access to \(service). \(detail)"
@@ -64,6 +66,17 @@ public enum APIError: Error, CustomStringConvertible {
     }
 
     public var description: String { "\(code): \(message)" }
+
+    /// Response headers this error implies. A 429 without `Retry-After` leaves
+    /// the client guessing, and every HTTP library knows how to read it.
+    public var headers: [String: String] {
+        switch self {
+        case let .tooManyRequests(_, retryAfter):
+            return ["Retry-After": String(max(1, retryAfter))]
+        default:
+            return [:]
+        }
+    }
 
     /// Extra hint surfaced in the JSON error payload — usually the exact
     /// System Settings pane the user needs to open.

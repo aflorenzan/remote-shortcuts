@@ -39,20 +39,37 @@ public final class HTTPServer: @unchecked Sendable {
             tcpOptions.enableKeepalive = false
         }
 
-        // Binding to a concrete address is what actually keeps the loopback
-        // default honest — not a check later in the request path.
-        if configuration.host != "0.0.0.0" && configuration.host != "::" {
-            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
-                host: NWEndpoint.Host(configuration.host),
-                port: NWEndpoint.Port(rawValue: configuration.port) ?? .any
-            )
-        }
-
         guard let port = NWEndpoint.Port(rawValue: configuration.port) else {
             throw ServerError.invalidPort(configuration.port)
         }
 
-        let listener = try NWListener(using: parameters, on: port)
+        // Binding to a concrete address is what actually keeps the loopback
+        // default honest — not a check later in the request path.
+        //
+        // The port goes in exactly one place. Setting `requiredLocalEndpoint`
+        // *and* passing `on: port` makes Network.framework reject the pair with
+        // EINVAL, so the server refused to start on any host other than
+        // 0.0.0.0 — which is every default install. Hence the two constructors
+        // below rather than one.
+        let listener: NWListener
+        do {
+            if configuration.host == "0.0.0.0" || configuration.host == "::" {
+                listener = try NWListener(using: parameters, on: port)
+            } else {
+                parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+                    host: NWEndpoint.Host(configuration.host),
+                    port: port
+                )
+                listener = try NWListener(using: parameters)
+            }
+        } catch {
+            // A bare errno tells the operator nothing. Say what we tried to bind.
+            throw ServerError.cannotBind(
+                host: configuration.host,
+                port: configuration.port,
+                underlying: error
+            )
+        }
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -142,6 +159,7 @@ public final class HTTPServer: @unchecked Sendable {
 
     public enum ServerError: Error, CustomStringConvertible {
         case invalidPort(UInt16)
+        case cannotBind(host: String, port: UInt16, underlying: Error)
         case listenFailed(NWError, port: UInt16)
         case startupTimeout
         case cancelled
@@ -150,6 +168,12 @@ public final class HTTPServer: @unchecked Sendable {
             switch self {
             case let .invalidPort(port):
                 return "Invalid port \(port)"
+            case let .cannotBind(host, port, underlying):
+                return """
+                Could not create a listener on \(host):\(port) — \(underlying)
+                If the host is not an address this machine holds, set 'host' in \(ConfigPaths.configFile.path) \
+                to one it does (or 0.0.0.0 to bind every interface).
+                """
             case let .listenFailed(error, port):
                 if case let .posix(code) = error, code == .EADDRINUSE {
                     return "Port \(port) is already in use. Stop the other process or set REMOTE_SHORTCUTS_PORT to a free port."
@@ -224,6 +248,25 @@ private final class ConnectionHandler: @unchecked Sendable {
         }
     }
 
+    /// Stops the idle timer while a request is being handled.
+    ///
+    /// The timer lives on this connection's queue, and so does request
+    /// handling. A request that outlasts the timeout does not get interrupted —
+    /// but the timer fires the moment the queue frees up, which cancelled the
+    /// socket immediately after the handler returned. The response was written
+    /// to a dead connection, so the client got an empty reply while the log
+    /// happily recorded a 504. Anything slower than `request_timeout_seconds`
+    /// was unreachable: a large Notes folder, or any shortcut taking over 30s.
+    ///
+    /// The timeout exists to reap *idle* sockets, so it is disarmed while there
+    /// is work in flight and re-armed once the reply is out.
+    private func cancelTimeout() {
+        lock.lock()
+        timeoutSource?.cancel()
+        timeoutSource = nil
+        lock.unlock()
+    }
+
     private func armTimeout() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + configuration.requestTimeoutSeconds)
@@ -294,6 +337,8 @@ private final class ConnectionHandler: @unchecked Sendable {
                     let served = requestsServed
                     lock.unlock()
 
+                    // No idle timer while we work; see `cancelTimeout`.
+                    cancelTimeout()
                     let response = requestHandler(request)
                     let keepAlive = request.keepAlive
                         && response.status != .payloadTooLarge
