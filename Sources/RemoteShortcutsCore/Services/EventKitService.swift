@@ -16,22 +16,41 @@ public final class EventKitService: @unchecked Sendable {
 
     // MARK: - Authorisation
 
-    public enum Access { case granted, denied, notDetermined, restricted }
+    /// Access levels, including macOS 14's write-only grant.
+    ///
+    /// `writeOnly` has to be its own case. Collapsing it into `granted` — which
+    /// is what this did — is silently dangerous: with write-only calendar
+    /// access, reads do not fail. `calendars(for:)` returns a single placeholder
+    /// (`VIRTUAL_APP_CALENDAR_UUID`) and event queries return empty, so a
+    /// machine with ten real calendars answered `200 {"count": 0}` and no client
+    /// could tell "nothing scheduled" from "not allowed to look".
+    public enum Access {
+        case granted
+        case writeOnly
+        case denied
+        case notDetermined
+        case restricted
+
+        /// Whether reads can be trusted. Write-only can create but not see.
+        var allowsReading: Bool { self == .granted }
+        var allowsWriting: Bool { self == .granted || self == .writeOnly }
+    }
 
     /// macOS 14 split `.authorized` into `.fullAccess` / `.writeOnly`; both the
     /// old and new cases are mapped here so one binary covers macOS 13+.
     public static func authorisationStatus(for entity: EKEntityType) -> Access {
         let status = EKEventStore.authorizationStatus(for: entity)
         if #available(macOS 14.0, *) {
-            if status == .fullAccess || status == .writeOnly { return .granted }
+            if status == .fullAccess { return .granted }
+            if status == .writeOnly { return .writeOnly }
         }
         switch status {
         case .authorized: return .granted
         case .denied: return .denied
         case .restricted: return .restricted
         case .notDetermined: return .notDetermined
-        // Covers `.fullAccess` / `.writeOnly` (handled above on macOS 14+)
-        // and any case a future SDK adds.
+        // `.fullAccess` / `.writeOnly` are handled above on macOS 14+; this
+        // covers any case a future SDK adds.
         default: return .denied
         }
     }
@@ -77,17 +96,38 @@ public final class EventKitService: @unchecked Sendable {
         let declared = EventKitService.authorisationStatus(for: entity)
         guard declared == .notDetermined else { return declared }
 
-        let visible = (try? sync { store in store.calendars(for: entity).count }) ?? 0
+        // With write-only access this returns one placeholder calendar
+        // (VIRTUAL_APP_CALENDAR_UUID), so counting rows is not enough — filter
+        // it out or the probe reports full access.
+        let visible = (try? sync { store in
+            store.calendars(for: entity).filter { !EventKitService.isPlaceholder($0) }.count
+        }) ?? 0
         return visible > 0 ? .granted : .notDetermined
     }
 
-    private func requireAccess(_ entity: EKEntityType) throws {
+    enum AccessKind { case read, write }
+
+    /// Checks access for what the caller is about to do.
+    ///
+    /// Reads and writes are distinguished because a write-only grant permits one
+    /// and quietly ruins the other: reads come back empty rather than failing.
+    /// A caller told "200, no events" makes worse decisions than one told
+    /// "you cannot read calendars".
+    private func requireAccess(_ entity: EKEntityType, for kind: AccessKind = .read) throws {
         let service = entity == .event ? "Calendars" : "Reminders"
         // Effective, not declared: otherwise a granted-but-not-yet-exercised
         // permission sends every first request into a 60-second prompt wait.
-        switch effectiveAccess(for: entity) {
+        let access = effectiveAccess(for: entity)
+
+        switch access {
         case .granted:
             return
+        case .writeOnly:
+            if kind == .write { return }
+            throw APIError.permissionDenied(
+                service: service,
+                detail: "This Mac granted write-only access, so events can be created but not read. Reading would silently return nothing rather than fail, so the request is refused instead."
+            )
         case .notDetermined:
             // Ask now: a LaunchAgent session can still present the prompt.
             if requestAccess(to: entity, timeout: 60) { return }
@@ -102,6 +142,12 @@ public final class EventKitService: @unchecked Sendable {
         }
     }
 
+    /// The stand-in calendar EventKit exposes under a write-only grant. It is
+    /// not a calendar the user has, and reporting it as one is misleading.
+    static func isPlaceholder(_ calendar: EKCalendar) -> Bool {
+        calendar.calendarIdentifier.uppercased().contains("VIRTUAL_APP_CALENDAR")
+    }
+
     private func sync<T>(_ work: @escaping (EKEventStore) throws -> T) throws -> T {
         try queue.sync { try work(store) }
     }
@@ -111,7 +157,9 @@ public final class EventKitService: @unchecked Sendable {
     public func listCalendars(entity: EKEntityType) throws -> [[String: Any]] {
         try requireAccess(entity)
         return try sync { store in
-            store.calendars(for: entity).map(EventKitService.serialise(calendar:))
+            store.calendars(for: entity)
+                .filter { !EventKitService.isPlaceholder($0) }
+                .map(EventKitService.serialise(calendar:))
         }
     }
 
@@ -140,12 +188,26 @@ public final class EventKitService: @unchecked Sendable {
 
     /// EventKit hands back a `CGColor`; `EKCalendar.color` is an `NSColor` and
     /// would drag AppKit into a background service for no reason.
+    ///
+    /// The colour is converted to sRGB first. Reading `components` directly
+    /// assumes an RGB space, and a calendar stored as greyscale has two
+    /// components (white, alpha) — so the old code reported the alpha as the
+    /// green channel and invented a blue one.
     static func hexString(from color: CGColor) -> String? {
-        guard let components = color.components, components.count >= 3 else { return nil }
-        let r = Int((components[0] * 255).rounded())
-        let g = Int((components[1] * 255).rounded())
-        let b = Int((components[2] * 255).rounded())
-        return String(format: "#%02X%02X%02X", max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b)))
+        let resolved: CGColor
+        if let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+           let converted = color.converted(to: srgb, intent: .defaultIntent, options: nil) {
+            resolved = converted
+        } else {
+            resolved = color
+        }
+
+        guard let components = resolved.components, components.count >= 3 else { return nil }
+
+        func channel(_ value: CGFloat) -> Int {
+            Int((max(0, min(1, value)) * 255).rounded())
+        }
+        return String(format: "#%02X%02X%02X", channel(components[0]), channel(components[1]), channel(components[2]))
     }
 
     /// Resolves a calendar by identifier or by title (case-insensitive), so
@@ -318,7 +380,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func createEvent(_ draft: EventDraft) throws -> [String: Any] {
-        try requireAccess(.event)
+        try requireAccess(.event, for: .write)
         guard let title = draft.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
             throw APIError.badRequest("Missing required field 'title'")
         }
@@ -356,7 +418,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func updateEvent(identifier: String, draft: EventDraft, span: EKSpan) throws -> [String: Any] {
-        try requireAccess(.event)
+        try requireAccess(.event, for: .write)
         return try sync { store in
             let resolved = try self.resolve(identifier, in: store)
             let event = resolved.event
@@ -402,7 +464,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func deleteEvent(identifier: String, span: EKSpan) throws {
-        try requireAccess(.event)
+        try requireAccess(.event, for: .write)
         try sync { store in
             guard let event = store.event(withIdentifier: identifier) else {
                 throw APIError.notFound("No event with id '\(identifier)'")
@@ -702,7 +764,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func createReminder(_ draft: ReminderDraft) throws -> [String: Any] {
-        try requireAccess(.reminder)
+        try requireAccess(.reminder, for: .write)
         guard let title = draft.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
             throw APIError.badRequest("Missing required field 'title'")
         }
@@ -724,7 +786,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func updateReminder(identifier: String, draft: ReminderDraft) throws -> [String: Any] {
-        try requireAccess(.reminder)
+        try requireAccess(.reminder, for: .write)
         return try sync { store in
             let reminder = try self.fetchReminder(identifier: identifier, in: store)
             if let title = draft.title { reminder.title = title }
@@ -743,7 +805,7 @@ public final class EventKitService: @unchecked Sendable {
     }
 
     public func deleteReminder(identifier: String) throws {
-        try requireAccess(.reminder)
+        try requireAccess(.reminder, for: .write)
         try sync { store in
             let reminder = try self.fetchReminder(identifier: identifier, in: store)
             do {

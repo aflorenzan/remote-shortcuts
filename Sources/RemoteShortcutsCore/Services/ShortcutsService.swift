@@ -138,9 +138,15 @@ public final class ShortcutsService: @unchecked Sendable {
 
     static func translate(result: ProcessRunner.Result, name: String?) -> APIError {
         let stderr = result.stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The Shortcuts CLI writes "Couldn't find shortcut" with a typographic
+        // apostrophe (U+2019), so matching a plain one missed it and a missing
+        // shortcut came back as 502 instead of 404. Normalise both forms.
         let lowered = stderr.lowercased()
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .replacingOccurrences(of: "\u{02BC}", with: "'")
 
-        if lowered.contains("couldn't find") || lowered.contains("no shortcut") || lowered.contains("not found") {
+        if lowered.contains("couldn't find") || lowered.contains("couldnt find")
+            || lowered.contains("no shortcut") || lowered.contains("not found") {
             return .notFound("No shortcut named '\(name ?? "?")'. Check GET /v1/shortcuts for the exact name.")
         }
         if lowered.contains("not authorized") || lowered.contains("permission") {

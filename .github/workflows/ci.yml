@@ -42,3 +42,9 @@ jobs:
         run: |
           swift run remote-shortcuts version
           swift run remote-shortcuts help
+
+      # The unit tests never open a socket, so a server that could not start at
+      # all shipped to main and into a release without anything noticing. This
+      # step boots the real binary on the default loopback host and talks to it.
+      - name: Smoke-test the server on loopback
+        run: ./scripts/smoke-test.sh

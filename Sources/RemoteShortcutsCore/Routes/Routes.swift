@@ -99,6 +99,7 @@ public struct RouteBuilder {
         func describe(_ access: EventKitService.Access) -> String {
             switch access {
             case .granted: return "granted"
+            case .writeOnly: return "write_only"
             case .denied: return "denied"
             case .notDetermined: return "not_determined"
             case .restricted: return "restricted"
@@ -120,6 +121,9 @@ public struct RouteBuilder {
         // that TCC has failed.
         if calendars == .notDetermined || reminders == .notDetermined {
             report["note"] = "'not_determined' means this process has not been asked for that permission yet, not that it was refused. Run 'remote-shortcuts preflight' from a terminal to request it."
+        }
+        if calendars == .writeOnly || reminders == .writeOnly {
+            report["note"] = "'write_only' means macOS allows creating items but not reading them. Reads are refused rather than returning empty results. Grant full access in System Settings → Privacy & Security."
         }
         return report
     }
@@ -197,6 +201,13 @@ public struct RouteBuilder {
     /// accept and ignore it there — the very bug this validation removes.
     private static let eventUpdateFields: Set<String> = eventCreateFields.union(["span"])
 
+    /// Fields rejected on create that ARE valid elsewhere. Saying only
+    /// "unknown" leaves the caller to guess; naming the endpoint that takes it
+    /// is the difference between a dead end and a fix.
+    private static let misplacedCreateFields: [String: String] = [
+        "span": "'span' selects which occurrences an edit affects, so it only applies to PATCH /v1/calendars/events/:id and DELETE /v1/calendars/events/:id?span=…, not to creating an event.",
+    ]
+
     private static let unsupportedEventFields: [String: String] = [
         "attendees": "EventKit exposes attendees as read-only, so invitees cannot be set through this API. Create the event and invite people from Calendar, or use a shortcut.",
         "organizer": "EventKit exposes the organizer as read-only.",
@@ -248,6 +259,7 @@ public struct RouteBuilder {
             try body.rejectUnknownFields(
                 allowed: RouteBuilder.eventCreateFields,
                 unsupported: RouteBuilder.unsupportedEventFields
+                    .merging(RouteBuilder.misplacedCreateFields) { existing, _ in existing }
             )
             var draft = EventKitService.EventDraft()
             draft.title = try body.nonEmptyString("title")

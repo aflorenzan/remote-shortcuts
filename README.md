@@ -226,9 +226,31 @@ Errors are always JSON, with a stable `code` and a hint about what to do:
 <details>
 <summary><b>macOS asks for permissions again after I rebuild</b></summary>
 
-Expected. The installer signs the bundle ad-hoc, so its code hash changes on
-every rebuild and macOS treats it as a new app. Grant the prompts again, or
-sign with a Developer ID certificate if you rebuild often.
+Expected, and unavoidable with the default install. The installer signs the
+bundle ad-hoc, and without a Team ID, TCC keys the grant to the bundle's code
+hash — which changes on every build. macOS therefore sees a new app and forgets
+the Calendars and Reminders grants. (Automation, for Notes, usually survives.)
+
+After a rebuild:
+
+```bash
+remote-shortcuts preflight   # re-request; approve the prompts
+remote-shortcuts doctor      # confirm
+```
+
+Until you do, those endpoints return `403` after waiting on a prompt nobody
+answers.
+
+**For a machine that runs this as a service**, sign with a Developer ID
+certificate instead. TCC then keys the grant to the stable Team ID and the
+permissions persist across rebuilds:
+
+```bash
+codesign --force --sign "Developer ID Application: Your Name (TEAMID)" \
+  --identifier com.remoteshortcuts.server ~/Applications/RemoteShortcuts.app
+```
+
+That needs a paid Apple Developer account, which is why it is not the default.
 </details>
 
 <details>
