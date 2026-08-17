@@ -46,6 +46,75 @@ public struct JSONBody {
         return !(value is NSNull)
     }
 
+    /// Rejects top-level fields the endpoint does not understand.
+    ///
+    /// Silently ignoring them is worse than it sounds: sending `due_date`
+    /// instead of `due` produced a reminder with no due date and a cheerful
+    /// `201 Created`, so a typo yields the wrong object with no signal at all.
+    ///
+    /// `unsupported` carries fields that are recognisable but deliberately not
+    /// writable, so the error can say why instead of just "unknown".
+    public func rejectUnknownFields(
+        allowed: Set<String>,
+        unsupported: [String: String] = [:]
+    ) throws {
+        let unknown = raw.keys.filter { !allowed.contains($0) }.sorted()
+        guard !unknown.isEmpty else { return }
+
+        if let first = unknown.first(where: { unsupported[$0] != nil }), let reason = unsupported[first] {
+            throw APIError.badRequest("Field '\(first)' is not supported: \(reason)")
+        }
+
+        let listed = unknown.map { "'\($0)'" }.joined(separator: ", ")
+        var message = unknown.count == 1
+            ? "Unknown field \(listed)."
+            : "Unknown fields \(listed)."
+
+        let suggestions = unknown.compactMap { name -> String? in
+            guard let match = JSONBody.closestMatch(to: name, in: allowed) else { return nil }
+            return "'\(name)' → did you mean '\(match)'?"
+        }
+        if !suggestions.isEmpty {
+            message += " " + suggestions.joined(separator: " ")
+        }
+        message += " Accepted fields: \(allowed.sorted().joined(separator: ", "))."
+        throw APIError.badRequest(message)
+    }
+
+    /// A near-miss finder good enough for typos: shared prefix, or a small
+    /// edit distance. Not fuzzy matching, just enough to point at `due` when
+    /// someone writes `due_date`.
+    static func closestMatch(to name: String, in candidates: Set<String>) -> String? {
+        let lowered = name.lowercased()
+        let normalised = lowered.replacingOccurrences(of: "_", with: "")
+
+        for candidate in candidates.sorted() {
+            let other = candidate.lowercased()
+            if lowered.hasPrefix(other) || other.hasPrefix(lowered) { return candidate }
+            if other.replacingOccurrences(of: "_", with: "") == normalised { return candidate }
+        }
+        return candidates.sorted().first { editDistance(lowered, $0.lowercased()) <= 2 }
+    }
+
+    static func editDistance(_ lhs: String, _ rhs: String) -> Int {
+        let a = Array(lhs), b = Array(rhs)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+
+        var previous = Array(0...b.count)
+        var current = [Int](repeating: 0, count: b.count + 1)
+
+        for i in 1...a.count {
+            current[0] = i
+            for j in 1...b.count {
+                let substitution = previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, substitution)
+            }
+            previous = current
+        }
+        return previous[b.count]
+    }
+
     public func string(_ key: String) throws -> String {
         guard let value = raw[key] else { throw APIError.badRequest("Missing required field '\(key)'") }
         guard let string = value as? String else { throw APIError.badRequest("Field '\(key)' must be a string") }

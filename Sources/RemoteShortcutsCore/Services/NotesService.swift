@@ -51,6 +51,14 @@ public final class NotesService: @unchecked Sendable {
             guard result.exitCode == 0 else {
                 throw NotesService.translate(stderr: result.stderrString, exitCode: result.exitCode)
             }
+
+            // The scripts fall back to per-note property access when the bulk
+            // form fails. That is correct but much slower, so surface it rather
+            // than letting the API quietly get sluggish.
+            if result.stderrString.contains("RS_BULK_FALLBACK") {
+                Log.warn("Apple Notes bulk property fetch failed; using the slow per-note path. \(NotesService.fallbackDetail(result.stderrString))")
+            }
+
             return result.stdoutString.trimmingCharacters(in: .newlines)
         }
     }
@@ -69,13 +77,31 @@ public final class NotesService: @unchecked Sendable {
         if lowered.contains("-600") || lowered.contains("application isn't running") {
             return .upstreamFailure("Apple Notes is not running and could not be launched.")
         }
+        // Only our own sentinel means "the caller asked for something that is
+        // not there". A bare -1728 is AppleScript failing to get a property,
+        // which is a fault on our side.
+        //
+        // These used to share the 404 mapping, and that is precisely how a
+        // total failure of `GET /v1/notes` — every non-empty folder erroring
+        // out — was mistaken for "folder not found" for as long as it was.
+        // Report the real message so the next one is diagnosable.
         if message.contains("REMOTE_SHORTCUTS_NOT_FOUND") {
             return .notFound("No matching note or folder")
         }
         if lowered.contains("-1728") {
-            return .notFound("Apple Notes could not find the requested item")
+            return .upstreamFailure(
+                "Apple Notes could not read a property (-1728). This is a fault in the script, not a missing item: \(message.isEmpty ? "no detail" : message)"
+            )
         }
         return .upstreamFailure("Apple Notes returned an error (exit \(exitCode)): \(message.isEmpty ? "no detail" : message)")
+    }
+
+    /// Pulls the AppleScript error out of the fallback log line, for the warning.
+    static func fallbackDetail(_ stderr: String) -> String {
+        guard let line = stderr.components(separatedBy: .newlines).first(where: { $0.contains("RS_BULK_FALLBACK") }) else {
+            return ""
+        }
+        return line.replacingOccurrences(of: "RS_BULK_FALLBACK", with: "").trimmingCharacters(in: .whitespaces)
     }
 
     private static func parseRecords(_ output: String) -> [[String]] {
@@ -225,18 +251,38 @@ public final class NotesService: @unchecked Sendable {
 
 // MARK: - Scripts
 
+/// Every script here is a constant. Values reach them through `argv` only.// MARK: - Scripts
+
 /// Every script here is a constant. Values reach them through `argv` only.
+///
+/// ## The specifier rule
+///
+/// The single thing to understand before editing these: **`repeat with f in
+/// (folders whose name is X)` yields evaluated references, not object
+/// specifiers.** Ask such a reference for `notes of f` and AppleScript hands
+/// back a *list* of note references; ask that list for `id of …` and it fails
+/// with -1728, because a list has no `id` property.
+///
+/// That is what broke `GET /v1/notes` for every folder that actually contained
+/// notes — empty folders returned 200 because the bulk fetch was skipped.
+///
+/// So these scripts address folders by index (`folder i`), which stays a real
+/// specifier, and `notes of folder i` is therefore a plural specifier that
+/// supports bulk property access.
+///
+/// Each bulk fetch is nonetheless wrapped in a `try` that falls back to
+/// per-note access. It is slower, but a slow correct answer beats a 404, and
+/// the fallback logs `RS_BULK_FALLBACK` to stderr so the degradation is
+/// visible rather than silent.
 private enum Scripts {
     /// Shared prelude.
     ///
-    /// It contains handlers only. A script with an explicit `on run` handler
-    /// may not also carry loose top-level statements, so the separators are
-    /// declared as properties (evaluated at compile time) rather than with
-    /// `set` at the top level.
+    /// Handlers only. A script with an explicit `on run` handler may not also
+    /// carry loose top-level statements, so the separators are properties.
     ///
     /// `isoDate` exists because AppleScript renders dates in the user's locale
     /// ("Friday, 15 August 2026 at 09:00"), which no date parser should have to
-    /// guess at. Emitting ISO-8601 by hand keeps the output locale-independent.
+    /// guess at.
     private static let prelude = """
     property fieldSep : (character id 31)
     property recordSep : (character id 30)
@@ -265,35 +311,40 @@ private enum Scripts {
     static let countFolders = """
     \(prelude)
     on run argv
-        tell application "Notes" to return (count of folders) as text
+        tell application "Notes" to return ((count of folders) as text)
     end run
     """
 
+    /// Folders are walked by index so `container of folder i` resolves. Reading
+    /// it off a `repeat with f in folders` reference fails with -1728, which is
+    /// why every nested folder used to report `account: ""`.
     static let listFolders = """
     \(prelude)
     on run argv
         set output to ""
         tell application "Notes"
-            repeat with f in folders
+            set folderCount to (count of folders)
+        end tell
+
+        repeat with i from 1 to folderCount
+            tell application "Notes"
+                set folderID to ((id of folder i) as text)
+                set folderName to ((name of folder i) as text)
+                set noteTotal to ((count of notes of folder i) as text)
                 set accountName to ""
                 try
-                    set accountName to (name of container of f)
+                    set accountName to ((name of container of folder i) as text)
                 end try
-                set output to output & ((id of f) as text) & fieldSep & ((name of f) as text) & fieldSep & ¬
-                    ((count of notes of f) as text) & fieldSep & accountName & recordSep
-            end repeat
-        end tell
+            end tell
+            set output to output & folderID & fieldSep & folderName & fieldSep & ¬
+                noteTotal & fieldSep & accountName & recordSep
+        end repeat
         return output
     end run
     """
 
     /// argv: 1 folder filter (may be ""), 2 search text (may be ""),
     ///       3 limit, 4 "1" to include the HTML body.
-    ///
-    /// Properties are fetched in bulk (`id of candidates` rather than `id of n`
-    /// inside a loop). Each property access across the `tell` boundary is a
-    /// separate Apple Event, so the per-note form costs four round trips per
-    /// note — minutes for a large folder. This form costs four per folder.
     static let listNotes = """
     \(prelude)
     on run argv
@@ -304,71 +355,124 @@ private enum Scripts {
 
         set output to ""
         set emitted to 0
+        set matchedFolder to false
 
         tell application "Notes"
-            if folderFilter is not "" then
-                set targetFolders to (folders whose name is folderFilter)
-                if (count of targetFolders) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-            else
-                set targetFolders to folders
-            end if
+            set folderCount to (count of folders)
+            set folderNames to {}
+            if folderCount > 0 then set folderNames to (name of folders)
+        end tell
 
-            repeat with f in targetFolders
-                if emitted < maxCount then
-                    set folderName to ((name of f) as text)
-                    if searchText is not "" then
-                        set candidates to (notes of f whose name contains searchText)
-                    else
-                        set candidates to notes of f
-                    end if
+        repeat with i from 1 to folderCount
+            if emitted < maxCount then
+                set folderName to ((item i of folderNames) as text)
 
-                    set noteCount to (count of candidates)
-                    if noteCount > 0 then
-                        set idList to (id of candidates)
-                        set nameList to (name of candidates)
-                        set createdList to (creation date of candidates)
-                        set modifiedList to (modification date of candidates)
-                        if wantBody then
-                            set bodyList to (body of candidates)
+                if (folderFilter is "") or (folderName is folderFilter) then
+                    set matchedFolder to true
+
+                    tell application "Notes"
+                        if searchText is not "" then
+                            set candidates to (notes of folder i whose name contains searchText)
                         else
-                            set bodyList to {}
+                            set candidates to notes of folder i
                         end if
+                        set noteCount to (count of candidates)
+                    end tell
 
-                        repeat with i from 1 to noteCount
+                    if noteCount > 0 then
+                        set idList to {}
+                        set nameList to {}
+                        set createdList to {}
+                        set modifiedList to {}
+                        set bodyList to {}
+
+                        try
+                            -- Bulk: a handful of Apple Events for the whole
+                            -- folder instead of four per note.
+                            tell application "Notes"
+                                set idList to (id of candidates)
+                                set nameList to (name of candidates)
+                                set createdList to (creation date of candidates)
+                                set modifiedList to (modification date of candidates)
+                                if wantBody then set bodyList to (body of candidates)
+                            end tell
+                        on error bulkError
+                            log "RS_BULK_FALLBACK " & bulkError
+                            set idList to {}
+                            set nameList to {}
+                            set createdList to {}
+                            set modifiedList to {}
+                            set bodyList to {}
+                            tell application "Notes"
+                                repeat with n in candidates
+                                    set end of idList to ((id of n) as text)
+                                    set end of nameList to ((name of n) as text)
+                                    set end of createdList to (creation date of n)
+                                    set end of modifiedList to (modification date of n)
+                                    if wantBody then set end of bodyList to ((body of n) as text)
+                                end repeat
+                            end tell
+                        end try
+
+                        repeat with k from 1 to (count of idList)
                             if emitted < maxCount then
                                 set bodyField to ""
-                                if wantBody then set bodyField to ((item i of bodyList) as text)
-                                set output to output & ((item i of idList) as text) & fieldSep & ¬
-                                    ((item i of nameList) as text) & fieldSep & folderName & fieldSep & ¬
-                                    my isoDate(item i of createdList) & fieldSep & ¬
-                                    my isoDate(item i of modifiedList) & fieldSep & bodyField & recordSep
+                                if wantBody then set bodyField to ((item k of bodyList) as text)
+                                set output to output & ((item k of idList) as text) & fieldSep & ¬
+                                    ((item k of nameList) as text) & fieldSep & folderName & fieldSep & ¬
+                                    my isoDate(item k of createdList) & fieldSep & ¬
+                                    my isoDate(item k of modifiedList) & fieldSep & bodyField & recordSep
                                 set emitted to emitted + 1
                             end if
                         end repeat
                     end if
                 end if
-            end repeat
-        end tell
+            end if
+        end repeat
+
+        if (folderFilter is not "") and (matchedFolder is false) then
+            error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+        end if
         return output
     end run
     """
 
     /// argv: 1 note id.
+    ///
+    /// Resolves through `note id X`, which is a real specifier, so `container`
+    /// resolves off it. The `whose` form is kept as a fallback but cannot report
+    /// the containing folder — that is why created notes used to come back with
+    /// `folder: ""`.
     static let getNote = """
     \(prelude)
     on run argv
         set noteID to item 1 of argv
+
         tell application "Notes"
-            set matches to (notes whose id is noteID)
-            if (count of matches) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-            set n to item 1 of matches
+            set resolved to false
+            try
+                set theNote to note id noteID
+                set probe to (name of theNote)
+                set resolved to true
+            end try
+
+            if resolved is false then
+                set matches to (notes whose id is noteID)
+                if (count of matches) is 0 then
+                    error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+                end if
+                set theNote to item 1 of matches
+            end if
+
             set folderName to ""
             try
-                set folderName to (name of container of n)
+                set folderName to ((name of container of theNote) as text)
             end try
-            return ((id of n) as text) & fieldSep & ((name of n) as text) & fieldSep & folderName & fieldSep & ¬
-                my isoDate(creation date of n) & fieldSep & my isoDate(modification date of n) & fieldSep & ¬
-                ((body of n) as text) & fieldSep & ((plaintext of n) as text) & recordSep
+
+            return ((id of theNote) as text) & fieldSep & ((name of theNote) as text) & fieldSep & ¬
+                folderName & fieldSep & my isoDate(creation date of theNote) & fieldSep & ¬
+                my isoDate(modification date of theNote) & fieldSep & ¬
+                ((body of theNote) as text) & fieldSep & ((plaintext of theNote) as text) & recordSep
         end tell
     end run
     """
@@ -383,9 +487,20 @@ private enum Scripts {
 
         tell application "Notes"
             if folderName is not "" then
-                set targetFolders to (folders whose name is folderName)
-                if (count of targetFolders) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-                set newNote to make new note at (item 1 of targetFolders) with properties {body:noteBody}
+                set targetIndex to 0
+                set folderCount to (count of folders)
+                set folderNames to {}
+                if folderCount > 0 then set folderNames to (name of folders)
+                repeat with i from 1 to folderCount
+                    if ((item i of folderNames) as text) is folderName then
+                        set targetIndex to i
+                        exit repeat
+                    end if
+                end repeat
+                if targetIndex is 0 then
+                    error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+                end if
+                set newNote to make new note at folder targetIndex with properties {body:noteBody}
             else
                 set newNote to make new note with properties {body:noteBody}
             end if
@@ -401,12 +516,25 @@ private enum Scripts {
         set noteID to item 1 of argv
         set newBody to item 2 of argv
         tell application "Notes"
-            set matches to (notes whose id is noteID)
-            if (count of matches) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-            set body of (item 1 of matches) to newBody
+            set body of (my resolveNote(noteID)) to newBody
         end tell
         return "ok"
     end run
+
+    on resolveNote(noteID)
+        tell application "Notes"
+            try
+                set theNote to note id noteID
+                set probe to (name of theNote)
+                return theNote
+            end try
+            set matches to (notes whose id is noteID)
+            if (count of matches) is 0 then
+                error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+            end if
+            return item 1 of matches
+        end tell
+    end resolveNote
     """
 
     /// argv: 1 note id, 2 HTML to append (may be ""), 3 HTML to prepend (may be "").
@@ -417,9 +545,7 @@ private enum Scripts {
         set appendHTML to item 2 of argv
         set prependHTML to item 3 of argv
         tell application "Notes"
-            set matches to (notes whose id is noteID)
-            if (count of matches) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-            set n to item 1 of matches
+            set n to my resolveNote(noteID)
             set current to ((body of n) as text)
             if prependHTML is not "" then set current to prependHTML & current
             if appendHTML is not "" then set current to current & appendHTML
@@ -427,6 +553,21 @@ private enum Scripts {
         end tell
         return "ok"
     end run
+
+    on resolveNote(noteID)
+        tell application "Notes"
+            try
+                set theNote to note id noteID
+                set probe to (name of theNote)
+                return theNote
+            end try
+            set matches to (notes whose id is noteID)
+            if (count of matches) is 0 then
+                error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+            end if
+            return item 1 of matches
+        end tell
+    end resolveNote
     """
 
     /// argv: 1 note id. Notes moves deletions to "Recently Deleted".
@@ -435,11 +576,24 @@ private enum Scripts {
     on run argv
         set noteID to item 1 of argv
         tell application "Notes"
-            set matches to (notes whose id is noteID)
-            if (count of matches) is 0 then error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
-            delete (item 1 of matches)
+            delete (my resolveNote(noteID))
         end tell
         return "ok"
     end run
+
+    on resolveNote(noteID)
+        tell application "Notes"
+            try
+                set theNote to note id noteID
+                set probe to (name of theNote)
+                return theNote
+            end try
+            set matches to (notes whose id is noteID)
+            if (count of matches) is 0 then
+                error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
+            end if
+            return item 1 of matches
+        end tell
+    end resolveNote
     """
 }

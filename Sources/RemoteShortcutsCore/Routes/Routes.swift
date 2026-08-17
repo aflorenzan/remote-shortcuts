@@ -104,12 +104,24 @@ public struct RouteBuilder {
             case .restricted: return "restricted"
             }
         }
-        return [
-            "calendars": describe(EventKitService.authorisationStatus(for: .event)),
-            "reminders": describe(EventKitService.authorisationStatus(for: .reminder)),
+
+        let calendars = eventKit.effectiveAccess(for: .event)
+        let reminders = eventKit.effectiveAccess(for: .reminder)
+
+        var report: [String: Any] = [
+            "calendars": describe(calendars),
+            "reminders": describe(reminders),
             "shortcuts_cli": ShortcutsService.isAvailable() ? "available" : "missing",
             "notes_app": NotesService.isAvailable() ? "available" : "missing",
         ]
+
+        // `not_determined` is the one status a caller cannot act on without
+        // knowing what it means, so say it rather than leaving them to guess
+        // that TCC has failed.
+        if calendars == .notDetermined || reminders == .notDetermined {
+            report["note"] = "'not_determined' means this process has not been asked for that permission yet, not that it was refused. Run 'remote-shortcuts preflight' from a terminal to request it."
+        }
+        return report
     }
 
     // MARK: - Shortcuts
@@ -128,12 +140,19 @@ public struct RouteBuilder {
         // though it reads like a lookup.
         router.post("/v1/shortcuts/run") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.shortcutFields)
             return try runShortcut(name: try body.nonEmptyString("name"), body: body)
         }
 
         // Convenience form so an n8n HTTP node can put the name in the URL.
         router.post("/v1/shortcuts/:name/run") { request in
             let body = (try? request.jsonBody()) ?? JSONBody([:])
+            // `name` comes from the path here, so a body `name` would be a
+            // second, possibly contradictory source. Reject rather than guess.
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.shortcutFields.subtracting(["name"]),
+                unsupported: ["name": "the shortcut name comes from the URL on this endpoint. Use POST /v1/shortcuts/run to pass it in the body."]
+            )
             return try runShortcut(name: try request.parameter("name"), body: body)
         }
     }
@@ -162,6 +181,35 @@ public struct RouteBuilder {
         }
         return .json(payload)
     }
+
+    // MARK: - Accepted fields
+    //
+    // Anything not listed here is rejected with a 400 rather than dropped.
+    // A field name that is merely recognisable — `attendees` — gets an
+    // explanation instead of a bare "unknown".
+
+    private static let eventCreateFields: Set<String> = [
+        "title", "start", "end", "all_day", "location", "notes", "url",
+        "calendar", "time_zone", "availability", "alarms_minutes_before",
+    ]
+
+    /// Only the update path reads `span`. Sharing one set with create would
+    /// accept and ignore it there — the very bug this validation removes.
+    private static let eventUpdateFields: Set<String> = eventCreateFields.union(["span"])
+
+    private static let unsupportedEventFields: [String: String] = [
+        "attendees": "EventKit exposes attendees as read-only, so invitees cannot be set through this API. Create the event and invite people from Calendar, or use a shortcut.",
+        "organizer": "EventKit exposes the organizer as read-only.",
+        "recurrence": "Recurrence rules cannot be set through this API yet. Create the series in Calendar and edit occurrences here.",
+    ]
+
+    private static let reminderFields: Set<String> = [
+        "title", "notes", "list", "due", "priority", "completed", "url",
+    ]
+
+    private static let noteCreateFields: Set<String> = ["title", "body", "format", "folder"]
+    private static let noteUpdateFields: Set<String> = ["body", "append", "prepend", "format"]
+    private static let shortcutFields: Set<String> = ["name", "input", "timeout"]
 
     // MARK: - Calendars
 
@@ -197,6 +245,10 @@ public struct RouteBuilder {
 
         router.post("/v1/calendars/events") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.eventCreateFields,
+                unsupported: RouteBuilder.unsupportedEventFields
+            )
             var draft = EventKitService.EventDraft()
             draft.title = try body.nonEmptyString("title")
             draft.start = try body.date("start")
@@ -207,6 +259,10 @@ public struct RouteBuilder {
 
         router.patch("/v1/calendars/events/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(
+                allowed: RouteBuilder.eventUpdateFields,
+                unsupported: RouteBuilder.unsupportedEventFields
+            )
             var draft = EventKitService.EventDraft()
             draft.title = try body.optionalString("title")
             draft.start = try body.optionalDate("start")
@@ -283,6 +339,7 @@ public struct RouteBuilder {
 
         router.post("/v1/reminders") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
             draft.title = try body.nonEmptyString("title")
             try applyCommonReminderFields(&draft, from: body)
@@ -291,6 +348,7 @@ public struct RouteBuilder {
 
         router.patch("/v1/reminders/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
             draft.title = try body.optionalString("title")
             try applyCommonReminderFields(&draft, from: body)
@@ -348,6 +406,7 @@ public struct RouteBuilder {
 
         router.post("/v1/notes") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.noteCreateFields)
             let format = try body.optionalString("format")?.lowercased() ?? "text"
             guard ["text", "html"].contains(format) else {
                 throw APIError.badRequest("Field 'format' must be 'text' or 'html'")
@@ -363,6 +422,7 @@ public struct RouteBuilder {
 
         router.patch("/v1/notes/:id") { request in
             let body = try request.jsonBody()
+            try body.rejectUnknownFields(allowed: RouteBuilder.noteUpdateFields)
             var edit = NotesService.NoteEdit()
             edit.body = try body.optionalString("body")
             edit.append = try body.optionalString("append")

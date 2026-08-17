@@ -10,11 +10,18 @@ public final class Router {
         let handler: Handler
         /// Mutating routes are blocked when the server runs in read-only mode.
         let mutating: Bool
+
+        /// A route whose last segment is a parameter captures everything left
+        /// in the path, so `/v1/notes/:id` matches an id containing slashes —
+        /// which every Apple Notes id does (`x-coredata://…/ICNote/p123`).
+        var hasGreedyTail: Bool { segments.last?.hasPrefix(":") ?? false }
     }
 
+    /// Kept partitioned: exact-arity routes first, greedy-tail routes after.
+    /// The ordering only changes when a route is registered, so it is computed
+    /// there rather than on every request.
     private var routes: [Route] = []
-
-    public init() {}
+    private var greedyStartIndex = 0
 
     public func get(_ path: String, _ handler: @escaping Handler) {
         add(method: "GET", path: path, mutating: false, handler: handler)
@@ -32,15 +39,30 @@ public final class Router {
         add(method: "DELETE", path: path, mutating: true, handler: handler)
     }
 
+    public init() {}
+
     private func add(method: String, path: String, mutating: Bool, handler: @escaping Handler) {
         let segments = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        routes.append(Route(method: method, segments: segments, handler: handler, mutating: mutating))
+        let route = Route(method: method, segments: segments, handler: handler, mutating: mutating)
+
+        if route.hasGreedyTail {
+            routes.append(route)
+        } else {
+            // Insert before the greedy block so exact matches are always tried
+            // first, preserving registration order within each group.
+            routes.insert(route, at: greedyStartIndex)
+            greedyStartIndex += 1
+        }
     }
 
     public func handle(_ request: HTTPRequest, readOnly: Bool) throws -> HTTPResponse {
-        let requestSegments = request.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let requestSegments = request.segments
         var pathMatched = false
 
+        // `routes` is already ordered exact-first, greedy-second. Without that
+        // ordering `/v1/reminders/:id` would swallow
+        // `/v1/reminders/<id>/complete`, since a greedy `:id` happily absorbs
+        // the trailing `complete`.
         for route in routes {
             guard let parameters = match(route: route, against: requestSegments) else { continue }
             pathMatched = true
@@ -58,9 +80,11 @@ public final class Router {
         // HEAD is answered as a GET with the body stripped, which keeps health
         // probes and uptime monitors working.
         if request.method == "HEAD" {
+            // Rebuild from segments, not from the rendered path: round-tripping
+            // through a string is exactly what this fix exists to avoid.
             let asGet = HTTPRequest(
                 method: "GET",
-                path: request.path,
+                segments: request.segments,
                 query: request.query,
                 headers: request.headers,
                 body: request.body,
@@ -82,19 +106,44 @@ public final class Router {
         throw APIError.notFound("No route for \(request.method) \(request.path). See GET /v1 for the available endpoints.")
     }
 
+    /// Only advertises methods from the group that would actually be reached.
+    /// If an exact-arity route matches this path, a greedy route never runs for
+    /// it, so naming its method in `Allow` would be a lie.
     private func allowedMethods(for segments: [String]) -> [String] {
-        var methods = routes.compactMap { match(route: $0, against: segments) != nil ? $0.method : nil }
+        let exact = routes.prefix(greedyStartIndex)
+        let candidates = exact.contains { match(route: $0, against: segments) != nil }
+            ? Array(exact)
+            : routes
+
+        var methods = candidates.compactMap { match(route: $0, against: segments) != nil ? $0.method : nil }
         if methods.contains("GET") { methods.append("HEAD") }
         return Array(Set(methods)).sorted()
     }
 
     private func match(route: Route, against segments: [String]) -> [String: String]? {
-        guard route.segments.count == segments.count else { return nil }
+        if route.hasGreedyTail {
+            guard segments.count >= route.segments.count else { return nil }
+        } else {
+            guard route.segments.count == segments.count else { return nil }
+        }
+
         var parameters: [String: String] = [:]
-        for (pattern, actual) in zip(route.segments, segments) {
+        for (index, pattern) in route.segments.enumerated() {
+            let isLast = index == route.segments.count - 1
+
             if pattern.hasPrefix(":") {
-                parameters[String(pattern.dropFirst())] = actual
-            } else if pattern != actual {
+                let name = String(pattern.dropFirst())
+                if isLast {
+                    // Rejoin the remainder with "/" so an id that contained
+                    // slashes — or an empty segment, as `x-coredata://` does —
+                    // comes back out exactly as the client sent it.
+                    let tail = segments[index...].joined(separator: "/")
+                    guard !tail.isEmpty else { return nil }
+                    parameters[name] = tail
+                } else {
+                    parameters[name] = segments[index]
+                }
+            } else if pattern != segments[index] {
                 return nil
             }
         }

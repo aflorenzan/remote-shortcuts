@@ -82,13 +82,13 @@ struct HTTPParser {
         guard buffer.count >= totalNeeded else { return .needMoreData }
 
         let body = buffer.subdata(in: buffer.startIndex.advanced(by: bodyStart)..<buffer.startIndex.advanced(by: totalNeeded))
-        let (path, query) = try HTTPParser.splitTarget(target)
+        let (segments, query) = try HTTPParser.splitTarget(target)
 
         let keepAlive = HTTPParser.resolveKeepAlive(version: version, connectionHeader: headers["connection"])
 
         let request = HTTPRequest(
             method: method,
-            path: path,
+            segments: segments,
             query: query,
             headers: headers,
             body: body,
@@ -169,20 +169,14 @@ struct HTTPParser {
         return headers
     }
 
-    static func splitTarget(_ target: String) throws -> (path: String, query: [String: String]) {
+    static func splitTarget(_ target: String) throws -> (segments: [String], query: [String: String]) {
         let parts = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         let rawPath = String(parts[0])
         guard rawPath.hasPrefix("/") else {
             throw ParseError.malformed("Request path must start with '/'")
         }
-        guard let decodedPath = rawPath.removingPercentEncoding else {
-            throw ParseError.malformed("Request path has invalid percent-encoding")
-        }
-        // Reject traversal outright. No route touches the filesystem by path,
-        // but normalising here means a future one cannot be tricked either.
-        guard !decodedPath.contains("..") else {
-            throw ParseError.malformed("Request path must not contain '..'")
-        }
+
+        let segments = try HTTPParser.pathSegments(of: rawPath)
 
         var query: [String: String] = [:]
         if parts.count == 2, !parts[1].isEmpty {
@@ -194,7 +188,46 @@ struct HTTPParser {
                 query[key] = value
             }
         }
-        return (HTTPParser.normalisePath(decodedPath), query)
+        return (segments, query)
+    }
+
+    /// Splits the path into segments and decodes each one **separately**.
+    ///
+    /// Decoding the whole path first — which is what this used to do — turns a
+    /// `%2F` inside a segment into a real separator, so a client has no way to
+    /// put a slash in a path parameter. That made every Apple Notes id
+    /// (`x-coredata://…/ICNote/p123`) unaddressable, since those ids are minted
+    /// by this very API and contain both `//` and `/`.
+    ///
+    /// Empty segments are preserved, apart from the leading one produced by the
+    /// opening `/` and a single trailing one from a trailing `/`. Preserving
+    /// them is what lets the router rebuild `x-coredata://…` with its double
+    /// slash intact; collapsing them silently yields `x-coredata:/…`, which
+    /// looks routable and then fails deeper in.
+    static func pathSegments(of rawPath: String) throws -> [String] {
+        var raw = rawPath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+
+        // Drop the empty piece before the leading slash.
+        if raw.first == "" { raw.removeFirst() }
+        // Drop one trailing empty piece so `/v1/notes/` routes like `/v1/notes`.
+        if raw.count > 1, raw.last == "" { raw.removeLast() }
+        if raw == [""] { return [] }
+
+        var segments: [String] = []
+        segments.reserveCapacity(raw.count)
+        for piece in raw {
+            guard let decoded = piece.removingPercentEncoding else {
+                throw ParseError.malformed("Request path has invalid percent-encoding")
+            }
+            // Traversal is checked per segment, after decoding, so `%2e%2e`
+            // cannot slip past by arriving encoded.
+            guard decoded != ".." else {
+                throw ParseError.malformed("Request path must not contain '..'")
+            }
+            if decoded == "." { continue }
+            segments.append(decoded)
+        }
+        return segments
     }
 
     /// Query strings encode spaces as `+`, which `removingPercentEncoding`
@@ -203,13 +236,11 @@ struct HTTPParser {
         raw.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? raw
     }
 
-    /// Collapses duplicate slashes and drops a trailing slash so `/v1/notes/`
-    /// and `/v1//notes` both route like `/v1/notes`.
-    static func normalisePath(_ path: String) -> String {
-        var components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        if components.isEmpty { return "/" }
-        components = components.filter { $0 != "." }
-        return "/" + components.joined(separator: "/")
+    /// Renders segments back into a path, for logs and error messages only.
+    /// Routing works on the segments themselves — going back through a string
+    /// is what lost the empty segment inside `x-coredata://…` in the first place.
+    static func renderPath(_ segments: [String]) -> String {
+        segments.isEmpty ? "/" : "/" + segments.joined(separator: "/")
     }
 
     static func resolveKeepAlive(version: String, connectionHeader: String?) -> Bool {

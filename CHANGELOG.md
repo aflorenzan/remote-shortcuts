@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Fixes from the first runtime verification against real data on macOS. Every
+item below was observed, not inferred — the code compiled and passed its unit
+tests throughout.
+
+### Fixed
+
+- **Notes: `GET /v1/notes` returned 404 for every folder that had notes in it.**
+  Folders reached through `folders whose name is X` are evaluated references
+  rather than object specifiers, so bulk property access (`id of candidates`)
+  failed with -1728. Empty folders skipped the bulk fetch and so appeared to
+  work. Folders are now addressed by index, and the bulk fetch falls back to
+  per-note access rather than failing outright.
+- **Notes: ids containing slashes were unroutable.** `GET`, `PATCH` and
+  `DELETE` on `/v1/notes/:id` answered "no route" for every id this API emits
+  (`x-coredata://…/ICNote/p123`). Paths are now split before percent-decoding,
+  each segment decoded separately, and a trailing `:id` captures the remainder.
+  This also fixes detached calendar occurrences (`<id>/RID=<n>`).
+- **Notes: a scripting failure was reported as 404.** A bare -1728 now returns
+  502 with the real AppleScript message; only our own sentinel means "not
+  found". Conflating them is what disguised the bug above.
+- **Notes: `container` was unreadable**, so created notes reported
+  `folder: ""` and 33 of 41 folders reported `account: ""`.
+- **Calendars: `DELETE …?span=this_event` could report success without
+  deleting anything.** When the occurrence had already been detached, the id
+  resolved to the series master and removal silently did nothing. The API now
+  verifies the occurrence exists before removing it and that it is gone
+  afterwards, returning 404 rather than a false `{"deleted": true}`.
+- **Calendars: `PATCH …span=this_event` could resurrect a deleted
+  occurrence.** Same root cause; now returns 404 instead of recreating it.
+- **Permissions: `/v1/system/permissions` reported `not_determined` for
+  permissions that were granted**, until some other call exercised them. It now
+  reports effective access, probed without prompting.
+
+### Changed
+
+- **Unknown request fields are rejected with a 400** instead of being ignored.
+  Sending `due_date` instead of `due` created a reminder with `due: null` and
+  returned `201`. The error names the offending fields, suggests the intended
+  one, and lists what is accepted. Fields that exist but are not writable
+  (`attendees`, `organizer`, `recurrence`) explain why.
+  **This is a behaviour change** for any client that was sending extra fields.
+- `docs/API.md` now documents the recurring-series limitation under `span`, and
+  states measured Notes write latency (~1.5–2 s) instead of the "few hundred
+  milliseconds" it previously claimed.
+
+### Known limitations
+
+- Every occurrence of a recurring series is returned with the same `id`, so a
+  single occurrence cannot be addressed and `span=future_events` rewrites the
+  whole series. Fixing it changes the id format — see
+  [docs/proposals/occurrence-ids.md](docs/proposals/occurrence-ids.md).
+
 ## [1.0.0] — 2026-08-15
 
 First release.

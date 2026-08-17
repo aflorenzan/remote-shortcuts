@@ -23,6 +23,11 @@ Authorization: Bearer <token>
 
 Output is always `2026-08-15T09:30:00.000Z`.
 
+**Unknown fields are rejected.** A body carrying a field the endpoint does not
+know gets a `400` naming it, rather than having it dropped — a typo like
+`due_date` for `due` used to produce a reminder with no due date and a `201`.
+The error suggests the intended field where it can, and lists what is accepted.
+
 **Errors** are always shaped like this:
 
 ```json
@@ -31,7 +36,7 @@ Output is always `2026-08-15T09:30:00.000Z`.
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| 400 | `bad_request` | Malformed JSON, missing or wrong-typed field |
+| 400 | `bad_request` | Malformed JSON, missing, wrong-typed or **unknown** field |
 | 401 | `unauthorized` | Missing or wrong token |
 | 403 | `forbidden` | Read-only mode, blocked shortcut, rejected source address |
 | 403 | `permission_denied` | macOS has not granted the needed privacy permission |
@@ -166,6 +171,20 @@ Same fields, all optional. Only what you send changes. Add `"span":
 "future_events"` to apply the edit to the rest of a recurring series
 (default is `this_event`).
 
+> **Limitation — recurring series.** Every occurrence of a series is returned
+> with the same `id`, because that is what EventKit exposes. There is currently
+> no way to address one occurrence:
+>
+> - `span=this_event` resolves to the series master, anchored at the series'
+>   **original start** — not to the occurrence you were looking at.
+> - `span=future_events` anchors in the same place, so it rewrites the whole
+>   series rather than the part from here onwards.
+>
+> If the occurrence an id points at has already been deleted or detached, the
+> API returns `404` rather than silently doing nothing (on `DELETE`) or
+> recreating it (on `PATCH`). Fixing the underlying ambiguity changes the id
+> format — see [proposals/occurrence-ids.md](proposals/occurrence-ids.md).
+
 ### `DELETE /v1/calendars/events/:id`
 `?span=future_events` for a series. Returns `{"deleted": true}`.
 
@@ -213,8 +232,11 @@ Apple ships no public SDK for Notes; this module drives its AppleScript
 dictionary. Two consequences worth knowing:
 
 - Notes.app must be installed. It is launched on demand.
-- Calls are serialised and slower than EventKit — expect a few hundred
-  milliseconds each.
+- Calls are serialised and slower than EventKit. Measured on an M-series Mac
+  Studio: **roughly 1.5–2 seconds per write** (20 notes created in 37 s). Reads
+  of a whole folder fetch properties in bulk and are considerably cheaper per
+  note. Budget accordingly in n8n — a loop over many notes is slow enough to
+  need a longer node timeout.
 
 ### `GET /v1/notes/folders`
 ```json

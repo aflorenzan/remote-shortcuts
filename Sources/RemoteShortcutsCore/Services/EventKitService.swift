@@ -63,9 +63,29 @@ public final class EventKitService: @unchecked Sendable {
         return granted
     }
 
+    /// The status TCC reports, corrected by what the process can actually do.
+    ///
+    /// `authorizationStatus(for:)` keeps saying `notDetermined` after the user
+    /// has granted access, until this process exercises that access for the
+    /// first time. A permissions endpoint that reports it raw therefore claims
+    /// nothing is granted right up until some other call proves otherwise,
+    /// which reads as "TCC is broken" when everything is fine.
+    ///
+    /// `calendars(for:)` never prompts and returns an empty array without
+    /// access, so it is a safe probe for a read-only endpoint to make.
+    public func effectiveAccess(for entity: EKEntityType) -> Access {
+        let declared = EventKitService.authorisationStatus(for: entity)
+        guard declared == .notDetermined else { return declared }
+
+        let visible = (try? sync { store in store.calendars(for: entity).count }) ?? 0
+        return visible > 0 ? .granted : .notDetermined
+    }
+
     private func requireAccess(_ entity: EKEntityType) throws {
         let service = entity == .event ? "Calendars" : "Reminders"
-        switch EventKitService.authorisationStatus(for: entity) {
+        // Effective, not declared: otherwise a granted-but-not-yet-exercised
+        // permission sends every first request into a 60-second prompt wait.
+        switch effectiveAccess(for: entity) {
         case .granted:
             return
         case .notDetermined:
@@ -280,6 +300,16 @@ public final class EventKitService: @unchecked Sendable {
                 throw APIError.forbidden("Event belongs to a read-only calendar.")
             }
 
+            // Same phantom as in `deleteEvent`, with a nastier outcome: saving
+            // the resolved master with `.thisEvent` makes EventKit
+            // re-materialise an occurrence the user had already deleted.
+            let target = EventKitService.OccurrenceRef(event)
+            if target.isRecurring, span == .thisEvent, !self.occurrenceExists(target, in: store) {
+                throw APIError.notFound(
+                    "The occurrence this id points at no longer exists — it was already deleted or detached from the series. Editing it would recreate it. Query GET /v1/calendars/events to get a current id."
+                )
+            }
+
             if let title = draft.title { event.title = title }
             if let start = draft.start { event.startDate = start }
             if let end = draft.end { event.endDate = end }
@@ -312,11 +342,75 @@ public final class EventKitService: @unchecked Sendable {
             guard let event = store.event(withIdentifier: identifier) else {
                 throw APIError.notFound("No event with id '\(identifier)'")
             }
+
+            // `event(withIdentifier:)` on a series always resolves, even when
+            // the occurrence it points at has already been detached or
+            // deleted. Removing that phantom silently succeeds, and reporting
+            // a deletion that did not happen is worse than any error.
+            // Recurring events only. For a one-off, the identifier lookup above
+            // already proved it exists, and gating an ordinary delete on a
+            // post-hoc identifier lookup would risk reporting failure for a
+            // deletion that succeeded — that path already worked.
+            let target = EventKitService.OccurrenceRef(event)
+            let needsOccurrenceCheck = target.isRecurring && span == .thisEvent
+
+            if needsOccurrenceCheck, !self.occurrenceExists(target, in: store) {
+                throw APIError.notFound(
+                    "The occurrence this id points at no longer exists — it was already deleted or detached from the series. Query GET /v1/calendars/events to get a current id."
+                )
+            }
+
             do {
                 try store.remove(event, span: span, commit: true)
             } catch {
                 throw APIError.upstreamFailure("Calendar rejected the deletion: \(error.localizedDescription)")
             }
+
+            // Confirm the occurrence actually went away rather than trusting
+            // that `remove` not throwing means it did.
+            if needsOccurrenceCheck, self.occurrenceExists(target, in: store) {
+                throw APIError.upstreamFailure(
+                    "Calendar accepted the deletion but the occurrence is still present. Nothing was deleted."
+                )
+            }
+        }
+    }
+
+    /// Identifies one occurrence: its series identifier plus where it sits.
+    struct OccurrenceRef {
+        let identifier: String?
+        let start: Date?
+        let isRecurring: Bool
+        let calendar: EKCalendar?
+
+        init(_ event: EKEvent) {
+            self.identifier = event.eventIdentifier
+            self.start = event.startDate
+            self.isRecurring = event.hasRecurrenceRules
+            self.calendar = event.calendar
+        }
+    }
+
+    /// Whether the occurrence is really there.
+    ///
+    /// For a one-off event the identifier lookup is the answer. For a series it
+    /// is not: the identifier resolves to the master anchored at the series'
+    /// original start whether or not that occurrence still exists, so the only
+    /// honest check is to look in the window it claims to occupy.
+    private func occurrenceExists(_ target: OccurrenceRef, in store: EKEventStore) -> Bool {
+        guard let identifier = target.identifier else { return false }
+        guard target.isRecurring, let start = target.start else {
+            return store.event(withIdentifier: identifier) != nil
+        }
+
+        let predicate = store.predicateForEvents(
+            withStart: start.addingTimeInterval(-1),
+            end: start.addingTimeInterval(1),
+            calendars: target.calendar.map { [$0] }
+        )
+        return store.events(matching: predicate).contains { candidate in
+            candidate.eventIdentifier == identifier
+                && abs((candidate.startDate ?? .distantPast).timeIntervalSince(start)) < 1
         }
     }
 
