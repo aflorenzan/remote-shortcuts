@@ -10,6 +10,35 @@ Fixes from the first runtime verification against real data on macOS. Every
 item below was observed, not inferred — the code compiled and passed its unit
 tests throughout.
 
+### Added
+
+- **Recurring occurrences are individually addressable.** Each occurrence now
+  comes back with a composite `id` (`<series_id>/RID=<seconds>`) plus a
+  `series_id`. Sending the composite id back pins `PATCH` and `DELETE` to that
+  occurrence, so `span=future_events` finally means "from this occurrence
+  onwards" rather than rewriting the series from its start.
+
+  The seconds are on Apple's reference date, which is what EventKit itself emits
+  for a detached occurrence, so those ids round-trip unchanged.
+
+  A bare identifier is still accepted and keeps its previous meaning — the
+  series master, anchored at the series' original start — so nothing written
+  against the old shape breaks. See
+  [docs/proposals/occurrence-ids.md](docs/proposals/occurrence-ids.md) for the
+  decision and the options considered.
+
+### Changed
+
+- **Unknown request fields are rejected with a 400** instead of being ignored.
+  Sending `due_date` instead of `due` created a reminder with `due: null` and
+  returned `201`. The error names the offending fields, suggests the intended
+  one, and lists what is accepted. Fields that exist but are not writable
+  (`attendees`, `organizer`, `recurrence`) explain why.
+  **This is a behaviour change** for any client that was sending extra fields.
+- `docs/API.md` now documents the composite occurrence ids and `span` semantics,
+  and states measured Notes write latency (~1.5–2 s) instead of the "few hundred
+  milliseconds" it previously claimed.
+
 ### Fixed
 
 - **Notes: `GET /v1/notes` returned 404 for every folder that had notes in it.**
@@ -38,25 +67,6 @@ tests throughout.
 - **Permissions: `/v1/system/permissions` reported `not_determined` for
   permissions that were granted**, until some other call exercised them. It now
   reports effective access, probed without prompting.
-
-### Changed
-
-- **Unknown request fields are rejected with a 400** instead of being ignored.
-  Sending `due_date` instead of `due` created a reminder with `due: null` and
-  returned `201`. The error names the offending fields, suggests the intended
-  one, and lists what is accepted. Fields that exist but are not writable
-  (`attendees`, `organizer`, `recurrence`) explain why.
-  **This is a behaviour change** for any client that was sending extra fields.
-- `docs/API.md` now documents the recurring-series limitation under `span`, and
-  states measured Notes write latency (~1.5–2 s) instead of the "few hundred
-  milliseconds" it previously claimed.
-
-### Known limitations
-
-- Every occurrence of a recurring series is returned with the same `id`, so a
-  single occurrence cannot be addressed and `span=future_events` rewrites the
-  whole series. Fixing it changes the id format — see
-  [docs/proposals/occurrence-ids.md](docs/proposals/occurrence-ids.md).
 
 ## [1.0.0] — 2026-08-15
 
