@@ -51,12 +51,22 @@ tests throughout.
   states measured Notes write latency (~1.5–2 s) instead of the "few hundred
   milliseconds" it previously claimed.
 
-### Known limitations
+### Added
 
-- Every occurrence of a recurring series is returned with the same `id`, so a
-  single occurrence cannot be addressed and `span=future_events` rewrites the
-  whole series. Fixing it changes the id format — see
-  [docs/proposals/occurrence-ids.md](docs/proposals/occurrence-ids.md).
+- **Recurring occurrences are individually addressable.** Each occurrence now
+  comes back with a composite `id` (`<series_id>/RID=<seconds>`) plus a
+  `series_id`. Sending the composite id back pins `PATCH` and `DELETE` to that
+  occurrence, so `span=future_events` finally means "from this occurrence
+  onwards" rather than rewriting the series from its start.
+
+  The seconds are on Apple's reference date, which is what EventKit itself emits
+  for a detached occurrence, so those ids round-trip unchanged.
+
+  A bare identifier is still accepted and keeps its previous meaning — the
+  series master, anchored at the series' original start — so nothing written
+  against the old shape breaks. See
+  [docs/proposals/occurrence-ids.md](docs/proposals/occurrence-ids.md) for the
+  decision and the options considered.
 
 ## [1.0.0] — 2026-08-15
 

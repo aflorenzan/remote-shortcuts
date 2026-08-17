@@ -142,6 +142,9 @@ Covers every account the Mac syncs — iCloud, Google, Exchange, CalDAV, local.
 | `q` | — | Case-insensitive match on title, notes, location |
 | `limit` | 250 | Max 1000 |
 
+Occurrences of a recurring series each carry their own composite `id` — see
+[Recurring series](#recurring-series) below.
+
 ```bash
 curl -G http://127.0.0.1:8787/v1/calendars/events \
   -H "Authorization: Bearer $TOKEN" \
@@ -171,19 +174,37 @@ Same fields, all optional. Only what you send changes. Add `"span":
 "future_events"` to apply the edit to the rest of a recurring series
 (default is `this_event`).
 
-> **Limitation — recurring series.** Every occurrence of a series is returned
-> with the same `id`, because that is what EventKit exposes. There is currently
-> no way to address one occurrence:
->
-> - `span=this_event` resolves to the series master, anchored at the series'
->   **original start** — not to the occurrence you were looking at.
-> - `span=future_events` anchors in the same place, so it rewrites the whole
->   series rather than the part from here onwards.
->
-> If the occurrence an id points at has already been deleted or detached, the
-> API returns `404` rather than silently doing nothing (on `DELETE`) or
-> recreating it (on `PATCH`). Fixing the underlying ambiguity changes the id
-> format — see [proposals/occurrence-ids.md](proposals/occurrence-ids.md).
+#### Recurring series
+
+Each occurrence of a series comes back with its own `id`, in the composite form
+`<series_id>/RID=<seconds>`, alongside a `series_id` naming the series itself:
+
+```json
+{
+  "id": "330D65C2-…/RID=825598800",
+  "series_id": "330D65C2-…",
+  "start": "2027-03-01T13:00:00.000Z",
+  "is_recurring": true
+}
+```
+
+Send the composite `id` back and `span` acts from **that occurrence**:
+
+| `span` | With a composite id | With a bare `series_id` |
+| --- | --- | --- |
+| `this_event` (default) | That one occurrence | The series master, anchored at the series' original start |
+| `future_events` | That occurrence and everything after it | The whole series |
+
+Use the `id` you were given. The bare form is accepted for compatibility and
+behaves as it always did, which is rarely what you want: an edit with
+`future_events` against a bare id rewrites the series from its beginning.
+
+`<seconds>` is on Apple's reference date (2001-01-01), matching what EventKit
+itself emits when an occurrence is detached — so a detached occurrence's id
+round-trips unchanged.
+
+If the occurrence an id names no longer exists, the API returns `404` rather
+than silently doing nothing (`DELETE`) or recreating it (`PATCH`).
 
 ### `DELETE /v1/calendars/events/:id`
 `?span=future_events` for a series. Returns `{"deleted": true}`.

@@ -1,7 +1,8 @@
 # Proposal: addressing a single occurrence of a recurring event
 
-**Status:** open — needs a decision before implementing
+**Status:** accepted and implemented — Option A
 **Raised by:** runtime verification, August 2026
+**Decided:** August 2026. Composite ids shipped; the bare form remains accepted.
 
 ## The problem
 
@@ -81,8 +82,20 @@ where the ambiguity actually starts.
 Ship it as a minor version with both forms accepted, and document the bare
 identifier as "the series, anchored at its original start".
 
-## Meanwhile
+## What was implemented
 
-`docs/API.md` documents the current limitation under `span`, and the write
-endpoints now return `404` rather than silently doing nothing or resurrecting a
-deleted occurrence.
+Option A, as recommended.
+
+- `GET /v1/calendars/events` returns a composite `id` per occurrence plus a
+  `series_id`.
+- `PATCH` and `DELETE` accept both forms. A composite id pins the operation to
+  that occurrence, so `span=future_events` finally means "from here onwards".
+- A bare identifier keeps its previous meaning and is documented as such, so
+  nothing written against the old shape breaks.
+- The seconds are on Apple's reference date, matching what EventKit emits for a
+  detached occurrence. That was worth verifying rather than assuming: a real
+  `RID=825598800` is 2027-03-01 on Apple's epoch and 1996-02-29 on Unix's, and
+  the observed occurrence was 2027-03-01.
+
+See `docs/API.md` under "Recurring series" for the contract, and
+`Sources/RemoteShortcutsCore/Services/EventReference.swift` for the parsing.

@@ -228,11 +228,63 @@ public final class EventKitService: @unchecked Sendable {
     public func event(withIdentifier identifier: String) throws -> [String: Any] {
         try requireAccess(.event)
         return try sync { store in
-            guard let event = store.event(withIdentifier: identifier) else {
-                throw APIError.notFound("No event with id '\(identifier)'")
-            }
-            return EventKitService.serialise(event: event)
+            let resolved = try self.resolve(identifier, in: store)
+            return EventKitService.serialise(event: resolved.event)
         }
+    }
+
+    struct ResolvedEvent {
+        let event: EKEvent
+        /// True when the caller named a specific occurrence, so `.thisEvent`
+        /// and `.futureEvents` act from *there* rather than from the series
+        /// start. That is the whole point of the composite id.
+        let pinnedToOccurrence: Bool
+    }
+
+    /// Resolves either id form to a concrete `EKEvent`.
+    ///
+    /// Order matters. The verbatim lookup comes first because a detached
+    /// occurrence's own identifier already contains a `/RID=` suffix, and
+    /// EventKit will resolve that string directly — re-deriving it from the
+    /// parsed parts would be a slower route to the same object, and would fail
+    /// if the suffix were ever not a timestamp.
+    func resolve(_ raw: String, in store: EKEventStore) throws -> ResolvedEvent {
+        let reference = EventReference.parse(raw)
+
+        if let event = store.event(withIdentifier: raw) {
+            return ResolvedEvent(event: event, pinnedToOccurrence: reference.isOccurrencePinned)
+        }
+
+        guard let start = reference.occurrenceStart else {
+            guard let event = store.event(withIdentifier: reference.identifier) else {
+                throw APIError.notFound("No event with id '\(raw)'")
+            }
+            return ResolvedEvent(event: event, pinnedToOccurrence: false)
+        }
+
+        // A composite id for an occurrence that has not been detached: the
+        // identifier alone resolves to the master, so find the occupant of the
+        // window the id names.
+        guard let master = store.event(withIdentifier: reference.identifier) else {
+            throw APIError.notFound("No event series with id '\(reference.identifier)'")
+        }
+
+        let predicate = store.predicateForEvents(
+            withStart: start.addingTimeInterval(-1),
+            end: start.addingTimeInterval(1),
+            calendars: master.calendar.map { [$0] }
+        )
+        let occurrence = store.events(matching: predicate).first { candidate in
+            EventReference.baseIdentifier(of: candidate.eventIdentifier ?? "") == reference.identifier
+                && abs((candidate.startDate ?? .distantPast).timeIntervalSince(start)) < 1
+        }
+
+        guard let occurrence else {
+            throw APIError.notFound(
+                "No occurrence of '\(reference.identifier)' starts at \(DateParsing.format(start)). It may have been deleted or moved — query GET /v1/calendars/events for current ids."
+            )
+        }
+        return ResolvedEvent(event: occurrence, pinnedToOccurrence: true)
     }
 
     public struct EventDraft {
@@ -293,9 +345,8 @@ public final class EventKitService: @unchecked Sendable {
     public func updateEvent(identifier: String, draft: EventDraft, span: EKSpan) throws -> [String: Any] {
         try requireAccess(.event)
         return try sync { store in
-            guard let event = store.event(withIdentifier: identifier) else {
-                throw APIError.notFound("No event with id '\(identifier)'")
-            }
+            let resolved = try self.resolve(identifier, in: store)
+            let event = resolved.event
             guard event.calendar?.allowsContentModifications ?? false else {
                 throw APIError.forbidden("Event belongs to a read-only calendar.")
             }
@@ -304,7 +355,8 @@ public final class EventKitService: @unchecked Sendable {
             // the resolved master with `.thisEvent` makes EventKit
             // re-materialise an occurrence the user had already deleted.
             let target = EventKitService.OccurrenceRef(event)
-            if target.isRecurring, span == .thisEvent, !self.occurrenceExists(target, in: store) {
+            if target.isRecurring, span == .thisEvent, !resolved.pinnedToOccurrence,
+               !self.occurrenceExists(target, in: store) {
                 throw APIError.notFound(
                     "The occurrence this id points at no longer exists — it was already deleted or detached from the series. Editing it would recreate it. Query GET /v1/calendars/events to get a current id."
                 )
@@ -447,9 +499,24 @@ public final class EventKitService: @unchecked Sendable {
         }
     }
 
+    /// The id handed to clients.
+    ///
+    /// For a recurring event this is the composite form, so each row of an
+    /// expanded series is individually addressable. For a one-off it is the
+    /// plain identifier, unchanged.
+    static func referenceIdentifier(for event: EKEvent) -> String? {
+        guard let identifier = event.eventIdentifier else { return nil }
+        guard event.hasRecurrenceRules, let start = event.startDate else { return identifier }
+        // A detached occurrence's identifier already carries the suffix.
+        if identifier.contains(EventReference.occurrenceMarker) { return identifier }
+        return EventReference(identifier: identifier, occurrenceStart: start).composite
+    }
+
     static func serialise(event: EKEvent) -> [String: Any] {
         var payload: [String: Any] = [
-            "id": JSONValueOrNull(event.eventIdentifier),
+            "id": JSONValueOrNull(referenceIdentifier(for: event)),
+            // The series identifier, for callers that mean the whole series.
+            "series_id": JSONValueOrNull(event.eventIdentifier.map(EventReference.baseIdentifier(of:))),
             "title": event.title ?? "",
             "start": DateParsing.formatOptional(event.startDate),
             "end": DateParsing.formatOptional(event.endDate),
