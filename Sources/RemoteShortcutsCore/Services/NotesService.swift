@@ -501,7 +501,7 @@ private enum Scripts {
         end if
         return output
     end run
-
+    """
 
     /// argv: 1 note id.
     ///
@@ -578,6 +578,7 @@ private enum Scripts {
 
         return ""
     end folderContaining
+    """
 
     /// argv: 1 title (unused by Notes but kept for clarity), 2 HTML body,
     ///       3 folder name (may be "" for the default folder).
