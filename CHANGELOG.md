@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-17
+
 Fixes from runtime verification against real data on macOS. Every item below was
 observed, not inferred — the code compiled and passed its unit tests throughout,
 which is exactly why none of it was caught earlier.
@@ -171,5 +173,6 @@ accounts)
   obsolete line folding and path traversal.
 - No shell anywhere; AppleScript receives user data only through `argv`.
 
-[Unreleased]: https://github.com/aflorenzan/remote-shortcuts/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/aflorenzan/remote-shortcuts/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/aflorenzan/remote-shortcuts/releases/tag/v1.1.0
 [1.0.0]: https://github.com/aflorenzan/remote-shortcuts/releases/tag/v1.0.0

@@ -16,6 +16,14 @@ A small webhook server for macOS. Point n8n — or anything that can make an HTT
 request — at it, and it drives the Apple apps on your Mac through Apple's own
 frameworks.
 
+> [!NOTE]
+> **Status:** the current artefacts are a pre-release. They start and pass the
+> full CI suite, including a smoke test that boots the server over TCP, but the
+> EventKit, Notes and Shortcuts paths are still being verified against real data
+> on a Mac. Building from source with `scripts/install.sh` is the recommended
+> path meanwhile. The v1.0.0 artefacts were withdrawn — that build could not
+> start at all.
+
 ```bash
 curl -X POST http://127.0.0.1:8787/v1/reminders \
   -H "Authorization: Bearer $TOKEN" \
