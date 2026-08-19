@@ -310,10 +310,22 @@ public final class EventKitService: @unchecked Sendable {
     /// EventKit will resolve that string directly — re-deriving it from the
     /// parsed parts would be a slower route to the same object, and would fail
     /// if the suffix were ever not a timestamp.
-    func resolve(_ raw: String, in store: EKEventStore) throws -> ResolvedEvent {
+    /// `preferOccurrenceQuery` skips the identifier shortcut and locates the
+    /// occurrence through a date predicate instead.
+    ///
+    /// `EKSpan.futureEvents` is documented against an occurrence obtained from
+    /// `events(matching:)`. An object from `event(withIdentifier:)` is not
+    /// obviously the same thing, and a `.futureEvents` save on one was observed
+    /// detaching that single occurrence rather than splitting the series. This
+    /// makes the span operations take the documented route.
+    func resolve(
+        _ raw: String,
+        in store: EKEventStore,
+        preferOccurrenceQuery: Bool = false
+    ) throws -> ResolvedEvent {
         let reference = EventReference.parse(raw)
 
-        if let event = store.event(withIdentifier: raw) {
+        if let event = store.event(withIdentifier: raw), !preferOccurrenceQuery {
             guard let wantedStart = reference.occurrenceStart else {
                 return ResolvedEvent(event: event, pinnedToOccurrence: false)
             }
@@ -334,7 +346,18 @@ public final class EventKitService: @unchecked Sendable {
             guard let event = store.event(withIdentifier: reference.identifier) else {
                 throw APIError.notFound("No event with id '\(raw)'")
             }
+            // A bare id names the series, so re-fetch its first occurrence
+            // through a query when a span operation needs one.
+            if preferOccurrenceQuery, event.hasRecurrenceRules,
+               let occurrence = self.occurrence(of: event, startingAt: event.startDate, in: store) {
+                return ResolvedEvent(event: occurrence, pinnedToOccurrence: false)
+            }
             return ResolvedEvent(event: event, pinnedToOccurrence: false)
+        }
+
+        if preferOccurrenceQuery, let master = store.event(withIdentifier: reference.identifier),
+           let occurrence = self.occurrence(of: master, startingAt: start, in: store) {
+            return ResolvedEvent(event: occurrence, pinnedToOccurrence: true)
         }
 
         // A composite id for an occurrence that has not been detached: the
@@ -420,8 +443,14 @@ public final class EventKitService: @unchecked Sendable {
     public func updateEvent(identifier: String, draft: EventDraft, span: EKSpan) throws -> [String: Any] {
         try requireAccess(.event, for: .write)
         return try sync { store in
-            let resolved = try self.resolve(identifier, in: store)
+            let resolved = try self.resolve(
+                identifier,
+                in: store,
+                preferOccurrenceQuery: span == .futureEvents
+            )
             let event = resolved.event
+            let wasDetached = event.isDetached
+            let wasRecurring = event.hasRecurrenceRules
             guard event.calendar?.allowsContentModifications ?? false else {
                 throw APIError.forbidden("Event belongs to a read-only calendar.")
             }
@@ -459,6 +488,22 @@ public final class EventKitService: @unchecked Sendable {
             } catch {
                 throw APIError.upstreamFailure("Calendar rejected the update: \(error.localizedDescription)")
             }
+
+            // Confirm EventKit did what was asked rather than something else.
+            //
+            // A `.futureEvents` save on a series was observed *detaching* the
+            // single occurrence instead of splitting the series: the later
+            // occurrences kept their old values while the call returned 200.
+            // Reporting success for an operation that did something different
+            // is worse than failing, so detect it and say so.
+            if span == .futureEvents, wasRecurring, !wasDetached, event.isDetached {
+                throw APIError.upstreamFailure(
+                    "Calendar applied this edit to one occurrence only, not to this and all later ones. "
+                        + "EventKit detached the occurrence instead of splitting the series, so the later "
+                        + "occurrences are unchanged. The edit to this occurrence has been kept. To change "
+                        + "the rest, edit each one using the composite ids from GET /v1/calendars/events."
+                )
+            }
             return EventKitService.serialise(event: event)
         }
     }
@@ -466,20 +511,33 @@ public final class EventKitService: @unchecked Sendable {
     public func deleteEvent(identifier: String, span: EKSpan) throws {
         try requireAccess(.event, for: .write)
         try sync { store in
-            guard let event = store.event(withIdentifier: identifier) else {
-                throw APIError.notFound("No event with id '\(identifier)'")
-            }
+            // Go through `resolve`, not a bare identifier lookup: a composite
+            // id names one occurrence, and `event(withIdentifier:)` on a series
+            // always hands back the master anchored at the series' original
+            // start — whether or not that occurrence still exists. Deleting
+            // that phantom silently succeeds, and reporting a deletion that did
+            // not happen is worse than any error.
+            let resolved = try self.resolve(
+                identifier,
+                in: store,
+                preferOccurrenceQuery: span == .futureEvents
+            )
+            let event = resolved.event
+            let seriesIdentifier = event.eventIdentifier.map(EventReference.baseIdentifier(of:))
+            let deletionStart = event.startDate
+            let deletionCalendar = event.calendar
+            let wasRecurring = event.hasRecurrenceRules
 
-            // `event(withIdentifier:)` on a series always resolves, even when
-            // the occurrence it points at has already been detached or
-            // deleted. Removing that phantom silently succeeds, and reporting
-            // a deletion that did not happen is worse than any error.
-            // Recurring events only. For a one-off, the identifier lookup above
-            // already proved it exists, and gating an ordinary delete on a
-            // post-hoc identifier lookup would risk reporting failure for a
-            // deletion that succeeded — that path already worked.
+            // Recurring events only, and only when the caller did not name a
+            // specific occurrence: `resolve` already found the real one, so
+            // there is nothing stale to guard against. For a one-off the
+            // resolve above proved it exists, and gating an ordinary delete on
+            // a post-hoc lookup would risk reporting failure for a deletion
+            // that succeeded — that path already worked.
             let target = EventKitService.OccurrenceRef(event)
-            let needsOccurrenceCheck = target.isRecurring && span == .thisEvent
+            let needsOccurrenceCheck = target.isRecurring
+                && span == .thisEvent
+                && !resolved.pinnedToOccurrence
 
             if needsOccurrenceCheck, !self.occurrenceExists(target, in: store) {
                 throw APIError.notFound(
@@ -500,6 +558,23 @@ public final class EventKitService: @unchecked Sendable {
                     "Calendar accepted the deletion but the occurrence is still present. Nothing was deleted."
                 )
             }
+
+            // For `future_events`, "did it work" means the later occurrences
+            // are gone too — not just this one.
+            if span == .futureEvents, wasRecurring,
+               let seriesIdentifier, let deletionStart,
+               self.hasOccurrences(
+                   ofSeries: seriesIdentifier,
+                   after: deletionStart,
+                   calendar: deletionCalendar,
+                   in: store
+               ) {
+                throw APIError.upstreamFailure(
+                    "Calendar removed this occurrence but left the later ones in place, so the series was "
+                        + "not truncated as 'future_events' asks. Delete the remaining occurrences "
+                        + "individually using the composite ids from GET /v1/calendars/events."
+                )
+            }
         }
     }
 
@@ -515,6 +590,42 @@ public final class EventKitService: @unchecked Sendable {
             self.start = event.startDate
             self.isRecurring = event.hasRecurrenceRules
             self.calendar = event.calendar
+        }
+    }
+
+    /// Finds the occurrence of `event` that starts at `start`, via a date
+    /// predicate — the route EventKit's span semantics are defined against.
+    private func occurrence(of event: EKEvent, startingAt start: Date?, in store: EKEventStore) -> EKEvent? {
+        guard let start, let identifier = event.eventIdentifier else { return nil }
+        let base = EventReference.baseIdentifier(of: identifier)
+        let predicate = store.predicateForEvents(
+            withStart: start.addingTimeInterval(-1),
+            end: start.addingTimeInterval(1),
+            calendars: event.calendar.map { [$0] }
+        )
+        return store.events(matching: predicate).first { candidate in
+            EventReference.baseIdentifier(of: candidate.eventIdentifier ?? "") == base
+                && abs((candidate.startDate ?? .distantPast).timeIntervalSince(start)) < 1
+        }
+    }
+
+    /// Whether any occurrence of the series still starts after `start`.
+    ///
+    /// The window is a year, which covers any series worth calling
+    /// `future_events` on without asking EventKit for an unbounded query.
+    private func hasOccurrences(
+        ofSeries identifier: String,
+        after start: Date,
+        calendar: EKCalendar?,
+        in store: EKEventStore
+    ) -> Bool {
+        let predicate = store.predicateForEvents(
+            withStart: start.addingTimeInterval(1),
+            end: start.addingTimeInterval(365 * 24 * 3600),
+            calendars: calendar.map { [$0] }
+        )
+        return store.events(matching: predicate).contains { candidate in
+            EventReference.baseIdentifier(of: candidate.eventIdentifier ?? "") == identifier
         }
     }
 

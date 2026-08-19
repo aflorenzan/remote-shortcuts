@@ -206,7 +206,26 @@ Send the composite `id` back and `span` acts from **that occurrence**:
 | `span` | With a composite id | With a bare `series_id` |
 | --- | --- | --- |
 | `this_event` (default) | That one occurrence | The series master, anchored at the series' original start |
-| `future_events` | That occurrence and everything after it | The whole series |
+| `future_events` | See the caveat below | See the caveat below |
+
+> [!WARNING]
+> **`future_events` does not reliably work, and the API will tell you when it
+> did not.** On a weekly series of four, editing the third occurrence with
+> `span=future_events` was observed changing only that occurrence: EventKit
+> detached it rather than splitting the series, leaving the fourth untouched.
+> The same happened with a bare id.
+>
+> Rather than return `200` for an edit that did something else, the server
+> checks the outcome and returns **`502 upstream_failure`** explaining that only
+> one occurrence changed. The edit to that occurrence is kept — it is not rolled
+> back.
+>
+> **To change an occurrence and everything after it**, edit each one using its
+> composite `id` from `GET /v1/calendars/events`. Tedious, but it does exactly
+> what you asked and nothing else.
+>
+> Being investigated. The good news from the same testing: the series no longer
+> gets *shifted in time*, which was the worse symptom this replaced.
 
 Use the `id` you were given. The bare form is accepted for compatibility and
 behaves as it always did, which is rarely what you want: an edit with
