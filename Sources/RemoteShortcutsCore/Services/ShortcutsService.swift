@@ -128,8 +128,8 @@ public final class ShortcutsService: @unchecked Sendable {
                 throw APIError.upstreamFailure("/usr/bin/shortcuts is missing. The Shortcuts CLI ships with macOS 12 and later.")
             case let .timedOut(_, seconds):
                 throw APIError.timeout("The shortcut did not finish within \(Int(seconds)) seconds. Raise 'timeout' in the request or 'shortcut_timeout_seconds' in the config.")
-            case .outputTooLarge:
-                throw APIError.unprocessable("The shortcut produced more output than the server accepts (8 MB).")
+            case let .outputTooLarge(_, limitBytes):
+                throw APIError.payloadTooLarge("The shortcut produced more than \(limitBytes / (1024 * 1024)) MB of output, more than this server will buffer.")
             case let .launchFailed(_, underlying):
                 throw APIError.upstreamFailure("Could not launch the Shortcuts CLI: \(underlying)")
             }

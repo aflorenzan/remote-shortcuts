@@ -26,7 +26,7 @@ public struct ProcessRunner {
         case executableMissing(String)
         case launchFailed(String, underlying: String)
         case timedOut(String, seconds: Double)
-        case outputTooLarge(String)
+        case outputTooLarge(String, limitBytes: Int)
 
         public var description: String {
             switch self {
@@ -36,8 +36,8 @@ public struct ProcessRunner {
                 return "Failed to launch \(path): \(underlying)"
             case let .timedOut(path, seconds):
                 return "\(path) did not finish within \(Int(seconds)) seconds"
-            case let .outputTooLarge(path):
-                return "\(path) produced more output than the configured limit"
+            case let .outputTooLarge(path, limitBytes):
+                return "\(path) produced more than \(limitBytes / (1024 * 1024)) MB of output"
             }
         }
     }
@@ -87,8 +87,16 @@ public struct ProcessRunner {
                 let handle = pipe.fileHandleForReading
                 while true {
                     let chunk = handle.availableData
-                    if chunk.isEmpty { break }
-                    if !collector.append(chunk, isStdout: isStdout, limit: maxOutputBytes) { break }
+                    if chunk.isEmpty { break } // EOF
+                    // Keep reading past the limit, discarding as we go.
+                    //
+                    // This loop used to `break` once the cap was hit, which
+                    // stopped draining the pipe: the child then blocked forever
+                    // writing into a full one, and the only thing that freed it
+                    // was the 30-second timeout — reported as "Apple Notes did
+                    // not respond", which was the opposite of the truth. Notes
+                    // had answered; nobody was listening.
+                    collector.append(chunk, isStdout: isStdout, limit: maxOutputBytes)
                 }
             }
         }
@@ -104,18 +112,30 @@ public struct ProcessRunner {
         }
         try? inputPipe.fileHandleForWriting.close()
 
+        func stopChild() {
+            process.terminate()
+            // Give it a moment to die on SIGTERM, then insist.
+            let graceDeadline = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < graceDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+
         let deadline = Date().addingTimeInterval(timeout)
         var timedOut = false
         while process.isRunning {
+            // Once the cap is blown the result is discarded either way, so
+            // there is nothing to gain by letting the child run to completion —
+            // and waiting out the full timeout is what made an oversized reply
+            // look like a hang.
+            if collector.exceededLimit {
+                stopChild()
+                break
+            }
             if Date() >= deadline {
                 timedOut = true
-                process.terminate()
-                // Give it a moment to die on SIGTERM, then insist.
-                let graceDeadline = Date().addingTimeInterval(2)
-                while process.isRunning && Date() < graceDeadline {
-                    Thread.sleep(forTimeInterval: 0.05)
-                }
-                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+                stopChild()
                 break
             }
             Thread.sleep(forTimeInterval: 0.02)
@@ -124,11 +144,11 @@ public struct ProcessRunner {
         process.waitUntilExit()
         _ = readGroup.wait(timeout: .now() + 5)
 
+        if collector.exceededLimit {
+            throw RunError.outputTooLarge(executable, limitBytes: maxOutputBytes)
+        }
         if timedOut {
             throw RunError.timedOut(executable, seconds: timeout)
-        }
-        if collector.exceededLimit {
-            throw RunError.outputTooLarge(executable)
         }
 
         return Result(
@@ -149,15 +169,22 @@ private final class OutputCollector: @unchecked Sendable {
     var stderr: Data { lock.lock(); defer { lock.unlock() }; return err }
     var exceededLimit: Bool { lock.lock(); defer { lock.unlock() }; return exceeded }
 
-    /// Returns false once the limit is hit so the reader stops draining.
-    func append(_ data: Data, isStdout: Bool, limit: Int) -> Bool {
+    /// Records the chunk, or notes that the limit is blown and drops it.
+    ///
+    /// Never tells the caller to stop reading: the reader has to keep draining
+    /// the pipe or the child blocks writing into it.
+    func append(_ data: Data, isStdout: Bool, limit: Int) {
         lock.lock()
         defer { lock.unlock() }
+        if exceeded { return }
         if out.count + err.count + data.count > limit {
             exceeded = true
-            return false
+            // Drop what we have; it is unusable and holding megabytes of a
+            // rejected reply serves nobody.
+            out.removeAll(keepingCapacity: false)
+            err.removeAll(keepingCapacity: false)
+            return
         }
         if isStdout { out.append(data) } else { err.append(data) }
-        return true
     }
 }
