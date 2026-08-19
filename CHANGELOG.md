@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reply over 8 MB deadlocked the subprocess instead of erroring.** The pipe
+  reader stopped draining once the output cap was hit, which left `osascript`
+  blocked forever writing into a full pipe; only the 30-second timeout freed it,
+  and the caller was told "Apple Notes did not respond" — the opposite of the
+  truth, since Notes had answered and nobody was reading. Observed as
+  `GET /v1/notes?include_body=true` failing with a 504 at exactly `limit=20` on
+  a folder of long notes, while `limit=15` worked.
+
+  The reader now drains and discards past the cap, the child is stopped as soon
+  as the cap is passed rather than at the timeout, and the error is
+  `413 payload_too_large` naming the limit and what to do about it. Any command
+  producing more than 8 MB was affected, not just Notes.
+
 ## [1.1.0] — 2026-08-17
 
 Fixes from runtime verification against real data on macOS. Every item below was

@@ -42,10 +42,18 @@ public final class NotesService: @unchecked Sendable {
                     timeout: timeout
                 )
             } catch let error as ProcessRunner.RunError {
-                if case .timedOut = error {
+                switch error {
+                case .timedOut:
                     throw APIError.timeout("Apple Notes did not respond within \(Int(timeout)) seconds. It may be showing a dialog or syncing.")
+                case let .outputTooLarge(_, limitBytes):
+                    // Almost always `include_body=true` over a folder of long
+                    // notes: the bodies alone can run to megabytes.
+                    throw APIError.payloadTooLarge(
+                        "Apple Notes returned more than \(limitBytes / (1024 * 1024)) MB, more than this server will buffer. Lower 'limit', or drop 'include_body' and fetch the bodies you need one note at a time."
+                    )
+                default:
+                    throw APIError.upstreamFailure(error.description)
                 }
-                throw APIError.upstreamFailure(error.description)
             }
 
             guard result.exitCode == 0 else {

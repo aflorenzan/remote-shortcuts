@@ -284,7 +284,13 @@ dictionary. Two consequences worth knowing:
 | `folder` | Exact folder name |
 | `q` | Substring of the note title |
 | `limit` | Default 50, max 500 |
-| `include_body` | `true` to include HTML bodies (slower) |
+| `include_body` | `true` to include HTML bodies (slower, and see the size limit below) |
+
+> **Size limit.** The server buffers at most 8 MB from Apple Notes in one call.
+> Note bodies are HTML and can be large — a folder of long notes can pass 8 MB in
+> around 20 of them. Over the limit you get `413 payload_too_large` promptly,
+> not a hang; lower `limit`, or drop `include_body` and fetch the bodies you
+> actually need one note at a time.
 
 ### `GET /v1/notes/:id`
 Returns the note including `body` (HTML) and `plain_text`.
