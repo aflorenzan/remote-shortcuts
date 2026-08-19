@@ -511,20 +511,33 @@ public final class EventKitService: @unchecked Sendable {
     public func deleteEvent(identifier: String, span: EKSpan) throws {
         try requireAccess(.event, for: .write)
         try sync { store in
-            guard let event = store.event(withIdentifier: identifier) else {
-                throw APIError.notFound("No event with id '\(identifier)'")
-            }
+            // Go through `resolve`, not a bare identifier lookup: a composite
+            // id names one occurrence, and `event(withIdentifier:)` on a series
+            // always hands back the master anchored at the series' original
+            // start — whether or not that occurrence still exists. Deleting
+            // that phantom silently succeeds, and reporting a deletion that did
+            // not happen is worse than any error.
+            let resolved = try self.resolve(
+                identifier,
+                in: store,
+                preferOccurrenceQuery: span == .futureEvents
+            )
+            let event = resolved.event
+            let seriesIdentifier = event.eventIdentifier.map(EventReference.baseIdentifier(of:))
+            let deletionStart = event.startDate
+            let deletionCalendar = event.calendar
+            let wasRecurring = event.hasRecurrenceRules
 
-            // `event(withIdentifier:)` on a series always resolves, even when
-            // the occurrence it points at has already been detached or
-            // deleted. Removing that phantom silently succeeds, and reporting
-            // a deletion that did not happen is worse than any error.
-            // Recurring events only. For a one-off, the identifier lookup above
-            // already proved it exists, and gating an ordinary delete on a
-            // post-hoc identifier lookup would risk reporting failure for a
-            // deletion that succeeded — that path already worked.
+            // Recurring events only, and only when the caller did not name a
+            // specific occurrence: `resolve` already found the real one, so
+            // there is nothing stale to guard against. For a one-off the
+            // resolve above proved it exists, and gating an ordinary delete on
+            // a post-hoc lookup would risk reporting failure for a deletion
+            // that succeeded — that path already worked.
             let target = EventKitService.OccurrenceRef(event)
-            let needsOccurrenceCheck = target.isRecurring && span == .thisEvent
+            let needsOccurrenceCheck = target.isRecurring
+                && span == .thisEvent
+                && !resolved.pinnedToOccurrence
 
             if needsOccurrenceCheck, !self.occurrenceExists(target, in: store) {
                 throw APIError.notFound(
