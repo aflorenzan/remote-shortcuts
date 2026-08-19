@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`span=future_events` returned 200 for an edit it did not make.** On a weekly
+  series of four, editing the third occurrence changed only that one: EventKit
+  detached it instead of splitting the series, leaving later occurrences
+  untouched. The same happened with a bare id, so it was not the id parsing.
+
+  Span operations now resolve the occurrence through a date predicate — the
+  route EventKit's span semantics are defined against — rather than through an
+  identifier lookup. **And the outcome is verified**: if the occurrence ends up
+  detached rather than the series split, or if a `future_events` delete leaves
+  later occurrences behind, the call returns `502` saying exactly that instead
+  of a misleading `200`. The change to the single occurrence is kept, not rolled
+  back, and the error says so.
+
+  `docs/API.md` now carries the caveat and tells callers to edit occurrences
+  individually meanwhile.
+
 - **A reply over 8 MB deadlocked the subprocess instead of erroring.** The pipe
   reader stopped draining once the output cap was hit, which left `osascript`
   blocked forever writing into a full pipe; only the 30-second timeout freed it,
