@@ -6,7 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [1.1.0] — 2026-08-20
+
+1.1.0 has not shipped as a stable release yet, so this section is where its
+fixes accumulate until it does, and each release candidate ships the whole of
+it. Fixes from runtime verification against real data on macOS: every item was
+observed, not inferred — the code compiled and passed its unit tests throughout,
+which is exactly why none of it was caught earlier.
+
+### Fixed — later rounds of runtime verification
+
+- **Four release candidates shipped notes that omitted their own fixes.** The
+  release workflow builds its notes from the CHANGELOG section matching the
+  version being tagged, and everything since rc.1 had accumulated under
+  `Unreleased` — so the artefact contained the fixes and the release page did
+  not mention them. The fixes are filed under `1.1.0` now, and the workflow
+  appends anything still under `Unreleased` instead of dropping it silently.
 
 - **`doctor` and `preflight` reported the permissions of whatever ran them, not
   the service's.** macOS attributes a privacy grant to the *responsible
@@ -80,13 +95,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `413 payload_too_large` naming the limit and what to do about it. Any command
   producing more than 8 MB was affected, not just Notes.
 
-## [1.1.0] — 2026-08-17
-
-Fixes from runtime verification against real data on macOS. Every item below was
-observed, not inferred — the code compiled and passed its unit tests throughout,
-which is exactly why none of it was caught earlier.
-
-### Fixed — the server did not start
+### Fixed — the server did not start (found in the first round)
 
 - **The listener never came up.** `requiredLocalEndpoint` carried the port and
   `NWListener(using:on:)` was given it again; Network.framework rejects the pair

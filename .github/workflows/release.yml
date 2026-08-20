@@ -212,6 +212,21 @@ jobs:
               inside && /^\[[^]]+\]: / { next }
               inside                   { print }
             ' CHANGELOG.md
+
+            # Anything still sitting under Unreleased is in this build too — it
+            # was compiled from the same tree. Silently dropping it is how four
+            # release candidates shipped notes that omitted their own fixes.
+            UNRELEASED="$(awk '
+              /^## \[Unreleased\]/ { inside = 1; next }
+              inside && /^## \[/    { exit }
+              inside                { print }
+            ' CHANGELOG.md | sed '/^[[:space:]]*$/d')"
+            if [[ -n "${UNRELEASED}" ]]; then
+              echo
+              echo "### Also in this build, not yet filed under a version"
+              echo
+              echo "${UNRELEASED}"
+            fi
           } > "${NOTES_FILE}"
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
