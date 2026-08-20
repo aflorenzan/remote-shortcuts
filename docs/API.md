@@ -381,6 +381,12 @@ dictionary. Two consequences worth knowing:
 > naming the size — instead of `body`, and the reply carries `bodies_omitted`
 > with the count. The note itself, its title, folder and dates, is still there.
 > Nothing is refused because one note is large.
+>
+> **This buys correctness, not speed.** Notes still hands the body to the script
+> before it can be measured, so a listing that reaches a very large note is
+> slow even though it now succeeds — measured at ~13s on a library containing
+> the 17.8 MB note. Scope with `folder=` to avoid it. There is no property that
+> reports a body's size without transferring it.
 
 ### `GET /v1/notes/:id`
 Returns the note including `body` (HTML) and `plain_text`.

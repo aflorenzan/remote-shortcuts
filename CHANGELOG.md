@@ -68,6 +68,10 @@ which is exactly why none of it was caught earlier.
   will not fit is replaced by **`body_omitted`** naming the size; the note comes
   back regardless. `include_body=false` is honoured on the detail endpoint.
 
+  This buys correctness rather than speed on listings: Notes hands a body to the
+  script before its size can be known, so a listing that reaches a very large
+  note now succeeds where it used to fail, but is still slow. Documented.
+
 - **A misspelled query parameter was ignored, and the answer looked fine.**
   `?calendar=RS-Test` — the parameter is `calendars` — returned `200` with all
   74 events on the Mac, and quietly contaminated a verification run before
