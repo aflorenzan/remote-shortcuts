@@ -89,15 +89,6 @@ which is exactly why none of it was caught earlier.
   and falls back to the old per-property path, logging `RS_PROPS_FALLBACK`, if
   that fails.
 
-### Added
-
-- **`GET /v1/diagnostics/event-resolution/:id`**, read-only, reporting what
-  `event(withIdentifier:)` returns for an id and which branch of the resolver a
-  real call takes. The question cannot be answered from outside the service —
-  all three possible answers produce the same observable behaviour, and only a
-  process holding the calendar grant can look — so the resolver's dead branches
-  can now be removed with evidence instead of guesswork.
-
 - **Four release candidates shipped notes that omitted their own fixes.** The
   release workflow builds its notes from the CHANGELOG section matching the
   version being tagged, and everything since rc.1 had accumulated under
@@ -196,6 +187,13 @@ which is exactly why none of it was caught earlier.
   shortcut over 30s. The timer is now disarmed while work is in flight.
 
 ### Added
+
+- **`GET /v1/diagnostics/event-resolution/:id`**, read-only, reporting what
+  `event(withIdentifier:)` returns for an id and which branch of the resolver a
+  real call takes. The question cannot be answered from outside the service —
+  all three possible answers produce the same observable behaviour, and only a
+  process holding the calendar grant can look — so the resolver's dead branches
+  can now be removed with evidence instead of guesswork.
 
 - **Recurring occurrences are individually addressable.** Each occurrence now
   comes back with a composite `id` (`<series_id>/RID=<seconds>`) plus a
