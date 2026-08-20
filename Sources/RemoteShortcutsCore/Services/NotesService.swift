@@ -24,8 +24,16 @@ public final class NotesService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.remoteshortcuts.notes")
     private let timeout: Double
 
-    public init(timeout: Double = 30) {
+    /// Characters of note body one reply may carry.
+    ///
+    /// Held here rather than passed per call, so `POST` and `PATCH` — which
+    /// return the note they just wrote — honour the same configured budget as
+    /// `GET`. Threading it through each call site is how they came to differ.
+    private let bodyBudgetBytes: Int
+
+    public init(timeout: Double = 30, bodyBudgetBytes: Int = 6_000_000) {
         self.timeout = timeout
+        self.bodyBudgetBytes = bodyBudgetBytes
     }
 
     // MARK: - Script runner
@@ -158,8 +166,7 @@ public final class NotesService: @unchecked Sendable {
         folder: String?,
         search: String?,
         limit: Int,
-        includeBody: Bool,
-        bodyBudgetBytes: Int = 6_000_000
+        includeBody: Bool
     ) throws -> [[String: Any]] {
         let output = try run(
             Scripts.listNotes,
@@ -209,8 +216,7 @@ public final class NotesService: @unchecked Sendable {
     public func note(
         id: String,
         folderHint: String? = nil,
-        includeBody: Bool = true,
-        bodyBudgetBytes: Int = 6_000_000
+        includeBody: Bool = true
     ) throws -> [String: Any] {
         let output = try run(
             Scripts.getNote,

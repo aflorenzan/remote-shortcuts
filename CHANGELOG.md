@@ -77,7 +77,9 @@ which is exactly why none of it was caught earlier.
   74 events on the Mac, and quietly contaminated a verification run before
   anyone noticed. Request bodies have rejected unknown fields since the
   `due_date` incident; query strings now do too, with the same near-miss
-  suggestions.
+  suggestions. **This is a behaviour change** for any client passing extra
+  parameters. `GET /v1` and `GET /v1/health` are exempt, since health checks
+  routinely append cache-busters.
 
 - **`GET /v1/notes/:id` took 1.2s where the equivalent AppleScript took 0.33s.**
   Every property read is a round trip to Notes, and the script was making about

@@ -28,7 +28,8 @@ something the endpoint does not know gets a `400` naming it, rather than having
 it dropped — `due_date` for `due` used to produce a reminder with no due date
 and a `201`, and `?calendar=` for `?calendars=` used to return every event on
 the Mac while looking like a filtered answer. The error suggests the intended
-name where it can, and lists what is accepted.
+name where it can, and lists what is accepted. `GET /v1` and `GET /v1/health`
+are exempt, because health checks routinely append cache-busting parameters.
 
 **Errors** are always shaped like this:
 

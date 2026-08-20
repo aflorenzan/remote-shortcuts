@@ -18,7 +18,7 @@ public final class App: @unchecked Sendable {
         self.router = RouteBuilder(
             configuration: configuration,
             eventKit: EventKitService(),
-            notes: NotesService(),
+            notes: NotesService(bodyBudgetBytes: configuration.noteBodyBudgetBytes),
             shortcuts: ShortcutsService(
                 allowList: configuration.allowedShortcuts,
                 defaultTimeout: configuration.shortcutTimeoutSeconds
