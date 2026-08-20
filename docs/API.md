@@ -232,31 +232,37 @@ Send the composite `id` back and `span` acts from **that occurrence**:
 | `span` | With a composite id | With a bare `series_id` |
 | --- | --- | --- |
 | `this_event` (default) | That one occurrence | The series master, anchored at the series' original start |
-| `future_events` | See the caveat below | See the caveat below |
+| `future_events` | That occurrence and every later one | Rewrites the series from its beginning |
 
-> [!WARNING]
-> **`future_events` does not reliably work, and the API will tell you when it
-> did not.** On a weekly series of four, editing the third occurrence with
-> `span=future_events` was observed changing only that occurrence: EventKit
-> detached it rather than splitting the series, leaving the fourth untouched.
-> The same happened with a bare id.
+> [!IMPORTANT]
+> **`span` goes in the body for `PATCH` and in the query for `DELETE`.**
+> `PATCH …?span=future_events` is refused with a `400` saying so. It used to be
+> accepted and ignored, applying `this_event` while returning `200` — which
+> changes exactly one occurrence of a series, and is indistinguishable from
+> `future_events` being broken. It was mistaken for exactly that, across two
+> rounds of testing.
 >
-> Rather than return `200` for an edit that did something else, the server
-> checks the outcome and returns **`502 upstream_failure`** explaining that only
-> one occurrence changed. The edit to that occurrence is kept — it is not rolled
-> back.
+> ```bash
+> curl -X PATCH "$BASE/v1/calendars/events/$ID" \
+>   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+>   -d '{"title": "Moved", "span": "future_events"}'      # body, for PATCH
 >
-> **To change an occurrence and everything after it**, edit each one using its
-> composite `id` from `GET /v1/calendars/events`. Tedious, but it does exactly
-> what you asked and nothing else.
->
-> `DELETE` with `span=future_events` **does** work: it removes the occurrence
-> and every later one, verified on real data. It is only `PATCH` that detaches.
+> curl -X DELETE "$BASE/v1/calendars/events/$ID?span=future_events" \
+>   -H "Authorization: Bearer $TOKEN"                     # query, for DELETE
+> ```
 
-Use the `id` you were given. The bare form is accepted for compatibility, and
-with `future_events` it detaches its own occurrence exactly as a composite id
-does — it does **not** rewrite the series from its beginning, as this document
-claimed until it was measured.
+Verified on real data with a weekly series of four: editing the third
+occurrence with a composite id and `future_events` changes the third and fourth
+and leaves the first two alone, all still recurring, with no shift in dates.
+`DELETE` behaves the same way.
+
+The server still checks the outcome and returns **`502 upstream_failure`** if a
+`future_events` edit ends up affecting only its own occurrence. That has never
+been observed on real hardware; it is a guard against EventKit misbehaving, not
+a description of what it does.
+
+Use the `id` you were given. The bare form is accepted for compatibility and
+rewrites the series from its beginning, which is rarely what you want.
 
 `<seconds>` is on Apple's reference date (2001-01-01), matching what EventKit
 itself emits when an occurrence is detached — so a detached occurrence's id
@@ -399,6 +405,18 @@ Returns the note including `body` (HTML) and `plain_text`.
 If the body is over the byte budget, `body` and `plain_text` are replaced by
 `body_omitted`. The rest of the note is returned either way: a note is never
 unreachable because it is large.
+
+> [!NOTE]
+> **`include_body=false` is for reach, not for speed.** It exists so a note too
+> large to return is still readable, and it is not reliably faster: the full
+> read gets everything in one `properties` round trip, while the metadata-only
+> read asks for each field separately. Both land around **0.7–1.0 s**.
+>
+> The floor is AppleScript itself. Fetching exactly what this endpoint returns —
+> name, container, body, plaintext and both dates — measures **~0.56 s** from
+> `osascript` alone on a 42-folder library, before this server does anything.
+> Getting materially below that would mean keeping an interpreter alive between
+> requests, which is an architecture change, not a tuning one.
 
 ### `POST /v1/notes`
 

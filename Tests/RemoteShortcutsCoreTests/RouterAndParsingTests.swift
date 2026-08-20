@@ -511,3 +511,47 @@ final class NoteBodyOmissionTests: XCTestCase {
         XCTAssertTrue(note.contains("note_body_budget_bytes"), note)
     }
 }
+
+/// `span` goes in the body for PATCH and in the query for DELETE.
+///
+/// PATCH used to accept `?span=` in its allow-list and then read the span from
+/// the body, so `?span=future_events` returned 200 having applied `this_event`.
+/// On a recurring series that changes exactly one occurrence — indistinguishable
+/// from a broken `future_events`, which is what it was mistaken for across two
+/// rounds of verification. Silently ignoring a parameter is worse than not
+/// accepting it, because the answer still looks like an answer.
+final class SpanPlacementTests: XCTestCase {
+    private func request(method: String, query: [String: String]) -> HTTPRequest {
+        HTTPRequest(
+            method: method,
+            path: "/v1/calendars/events/abc",
+            query: query,
+            headers: [:],
+            body: Data(),
+            remoteAddress: "127.0.0.1",
+            keepAlive: false
+        )
+    }
+
+    /// PATCH accepts no query parameters at all now, `span` least of all.
+    func testPatchRejectsSpanInTheQuery() {
+        XCTAssertThrowsError(
+            try request(method: "PATCH", query: ["span": "future_events"])
+                .rejectUnknownQuery(allowed: [])
+        )
+    }
+
+    /// DELETE has no body, so the query is the only place it can go.
+    func testDeleteAcceptsSpanInTheQuery() {
+        XCTAssertNoThrow(
+            try request(method: "DELETE", query: ["span": "future_events"])
+                .rejectUnknownQuery(allowed: ["span"])
+        )
+    }
+
+    /// The body is where PATCH reads it from, and it still parses.
+    func testSpanParsesFromTheBody() throws {
+        let body = JSONBody(["span": "future_events"])
+        XCTAssertEqual(body.raw["span"] as? String, "future_events")
+    }
+}

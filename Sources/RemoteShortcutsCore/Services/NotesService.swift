@@ -670,6 +670,20 @@ private enum Scripts {
                     set rawBody to ((body of theNote) as text)
                     set rawPlain to ((plaintext of theNote) as text)
                 end if
+                -- Read the container here, in the block that is already open.
+                --
+                -- Without this, `include_body=false` fell through to the
+                -- `folderOf` handler below: a second `tell` block for the same
+                -- two reads, with the whole-library scan behind it if anything
+                -- went wrong. That made the endpoint's cheapest path its most
+                -- expensive one — measured slower than fetching the body,
+                -- which gets the container free inside `properties`.
+                if folderName is "" then
+                    try
+                        set theContainer to (container of theNote)
+                        set folderName to ((name of theContainer) as text)
+                    end try
+                end if
             end if
 
             -- The body is measured before it is returned. A note of embedded

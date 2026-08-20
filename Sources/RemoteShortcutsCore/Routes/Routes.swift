@@ -239,7 +239,7 @@ public struct RouteBuilder {
     /// "unknown" leaves the caller to guess; naming the endpoint that takes it
     /// is the difference between a dead end and a fix.
     private static let misplacedCreateFields: [String: String] = [
-        "span": "'span' selects which occurrences an edit affects, so it only applies to PATCH /v1/calendars/events/:id and DELETE /v1/calendars/events/:id?span=…, not to creating an event.",
+        "span": "'span' selects which occurrences an edit affects, so it only applies to editing: in the body of PATCH /v1/calendars/events/:id, or in the query of DELETE /v1/calendars/events/:id (which has no body). Not to creating an event.",
     ]
 
     private static let unsupportedEventFields: [String: String] = [
@@ -308,7 +308,23 @@ public struct RouteBuilder {
         }
 
         router.patch("/v1/calendars/events/:id") { request in
-            try request.rejectUnknownQuery(allowed: ["span"])
+            // `span` is read from the body here, so accepting it in the query
+            // was accepting a parameter nobody reads.
+            //
+            // `?span=future_events` returned 200 having quietly applied
+            // `this_event` — which on a recurring series changes exactly one
+            // occurrence, the same symptom as a broken `future_events`. Two
+            // rounds of verification chased that phantom, a working safety net
+            // was rewritten to catch it, and three false statements went into
+            // docs/API.md before anyone noticed the request had never asked
+            // for what it appeared to ask for.
+            if request.query["span"] != nil {
+                throw APIError.badRequest(
+                    "'span' goes in the request body for PATCH, not the query string: send {\"span\": \"future_events\"}. "
+                        + "The query form belongs to DELETE, which has no body. Accepting it here would have silently applied 'this_event'."
+                )
+            }
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
                 allowed: RouteBuilder.eventUpdateFields,
