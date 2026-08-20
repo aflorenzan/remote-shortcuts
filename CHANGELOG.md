@@ -180,21 +180,20 @@ which is exactly why none of it was caught earlier.
   choice and `?include_body=true` on its own should not fail. The response
   reports `limit_applied` when it clamps.
 
-- **`span=future_events` returned 200 for an edit it did not make.** On a weekly
-  series of four, editing the third occurrence changed only that one: EventKit
-  detached it instead of splitting the series, leaving later occurrences
-  untouched. The same happened with a bare id, so it was not the id parsing.
+- **Span operations resolve the occurrence through a date predicate**, the route
+  EventKit's span semantics are defined against, rather than through an
+  identifier lookup. The outcome is then verified: if a `future_events` edit
+  ends up affecting only its own occurrence, or a `future_events` delete leaves
+  later occurrences behind, the call returns `502` saying so instead of a
+  misleading `200`.
 
-  Span operations now resolve the occurrence through a date predicate — the
-  route EventKit's span semantics are defined against — rather than through an
-  identifier lookup. **And the outcome is verified**: if the occurrence ends up
-  detached rather than the series split, or if a `future_events` delete leaves
-  later occurrences behind, the call returns `502` saying exactly that instead
-  of a misleading `200`. The change to the single occurrence is kept, not rolled
-  back, and the error says so.
-
-  `docs/API.md` now carries the caveat and tells callers to edit occurrences
-  individually meanwhile.
+  > **Superseded.** This entry originally reported that `future_events` changed
+  > only the occurrence it named. It does not, and never did — see the retracted
+  > entry above. Whether this report shared the query-string mistake that
+  > invalidated the later ones was never established, but no detachment has been
+  > observed since, on any invocation known to have been well formed. The
+  > predicate resolution and the check are kept as safeguards; the claim that
+  > they were fixing an observed failure is withdrawn.
 
 - **A reply over 8 MB deadlocked the subprocess instead of erroring.** The pipe
   reader stopped draining once the output cap was hit, which left `osascript`
