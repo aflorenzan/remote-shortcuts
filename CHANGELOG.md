@@ -23,6 +23,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   service; `preflight` uses it. All the remedy text was rewritten to stop
   recommending something that cannot work.
 
+  `scripts/install.sh` runs the permission step *after* the LaunchAgent is up
+  rather than before it, since `preflight` now needs a service to talk to, and
+  its reinstall notice no longer claims a bare `preflight` re-grants the service.
+
 - **Every read blocked for 60 seconds before its 403 when permissions were
   undetermined.** The prompt was raised on each request with a 60-second wait,
   and under launchd nobody is watching to accept it, so a permission problem

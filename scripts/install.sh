@@ -25,6 +25,7 @@ CONFIG_DIR="${HOME}/.config/remote-shortcuts"
 
 SKIP_PREFLIGHT=0
 SKIP_AGENT=0
+SERVER_UP=0
 
 usage() {
     cat <<EOF
@@ -139,14 +140,7 @@ chmod 600 "${CONFIG_DIR}/config.json" 2>/dev/null || true
 TOKEN="$("${APP_BINARY}" token show)"
 ENDPOINT="$("${APP_BINARY}" endpoint)"
 
-# --- 5. Permissions --------------------------------------------------------
-
-if (( SKIP_PREFLIGHT == 0 )); then
-    info "Requesting macOS permissions (approve the prompts that appear)"
-    "${APP_BINARY}" preflight || warn "Some permissions were not granted. Run 'remote-shortcuts doctor' later."
-fi
-
-# --- 6. LaunchAgent --------------------------------------------------------
+# --- 5. LaunchAgent --------------------------------------------------------
 
 if (( SKIP_AGENT == 0 )); then
     info "Installing the LaunchAgent"
@@ -205,8 +199,28 @@ PLIST
 
     if curl -fsS --max-time 2 "${ENDPOINT}/v1/health" >/dev/null 2>&1; then
         info "Server is healthy"
+        SERVER_UP=1
     else
         warn "The server did not answer on ${ENDPOINT}. Check ${LOG_DIR}/server.error.log"
+    fi
+fi
+
+# --- 6. Permissions --------------------------------------------------------
+#
+# This runs *after* the LaunchAgent is up, and not by accident. macOS attributes
+# a privacy grant to the responsible process, so a prompt raised by this script
+# would be granted to your terminal, not to the service. `preflight` therefore
+# asks the running service to raise the prompts itself, which means the service
+# has to exist first.
+
+if (( SKIP_PREFLIGHT == 0 )); then
+    if (( SERVER_UP == 1 )); then
+        info "Requesting macOS permissions for the service (approve the prompts that appear)"
+        "${APP_BINARY}" preflight || warn "Some permissions were not granted. Run 'remote-shortcuts doctor' later."
+    else
+        warn "Skipping permission prompts: the service is not running, and only the
+      service can be granted anything. Start it and run 'remote-shortcuts preflight':
+      launchctl kickstart -k gui/\$(id -u) ${BUNDLE_ID}"
     fi
 fi
 
@@ -230,12 +244,17 @@ $(printf '\033[1;32mInstalled.\033[0m')
 $(if (( REINSTALL == 1 )); then cat <<'REGRANT'
   ⚠️  You reinstalled over an existing bundle. Because the signature is ad-hoc,
       its code hash changed and macOS treats it as a new app, so Calendars and
-      Reminders permissions have to be granted again:
+      Reminders permissions had to be granted again — that is what the prompts
+      during step 6 were for. Confirm they took:
 
-        remote-shortcuts preflight     # re-request them, then approve
-        remote-shortcuts doctor        # confirm
+        remote-shortcuts doctor        # reports what the *service* holds
 
-      Until then those endpoints return 403 after a 60-second prompt wait.
+      If they did not, re-request them with the service running:
+
+        remote-shortcuts preflight     # asks the service to prompt; approve
+
+      Prompting from a terminal any other way grants your terminal, not the
+      service. Until the service holds them, those endpoints return 403.
 
 REGRANT
 fi)

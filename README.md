@@ -239,15 +239,17 @@ bundle ad-hoc, and without a Team ID, TCC keys the grant to the bundle's code
 hash — which changes on every build. macOS therefore sees a new app and forgets
 the Calendars and Reminders grants. (Automation, for Notes, usually survives.)
 
-After a rebuild:
+After a rebuild, with the service running:
 
 ```bash
-remote-shortcuts preflight   # re-request; approve the prompts
-remote-shortcuts doctor      # confirm
+launchctl kickstart -k gui/$(id -u)/com.remoteshortcuts.server   # load the new build
+remote-shortcuts preflight   # asks the service to prompt; approve them
+remote-shortcuts doctor      # confirm what the service holds
 ```
 
-Until you do, those endpoints return `403` after waiting on a prompt nobody
-answers.
+`preflight` has to reach the running service, because the service is what needs
+the grant — see [`POST /v1/system/permissions/request`](docs/API.md#post-v1systempermissionsrequest).
+Until the service holds them, those endpoints return `403`.
 
 **For a machine that runs this as a service**, sign with a Developer ID
 certificate instead. TCC then keys the grant to the stable Team ID and the
@@ -264,9 +266,14 @@ That needs a paid Apple Developer account, which is why it is not the default.
 <details>
 <summary><b>403 <code>permission_denied</code> on calendar or reminder calls</b></summary>
 
-Run `remote-shortcuts preflight` from a terminal, where you are present to
-approve the dialogs. If a permission was previously denied, macOS will not
-re-prompt — enable it manually in System Settings → Privacy & Security.
+Start the service if it is not running, then run `remote-shortcuts preflight`
+from a terminal, with somebody at the Mac to approve the dialogs. `preflight`
+asks the *service* to raise them; a prompt raised any other way from a terminal
+is granted to the terminal instead, which is why `doctor` can look healthy while
+the service still has nothing.
+
+If a permission was previously denied, macOS will not re-prompt — enable it
+manually in System Settings → Privacy & Security.
 </details>
 
 <details>
