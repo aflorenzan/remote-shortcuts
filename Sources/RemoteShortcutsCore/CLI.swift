@@ -252,8 +252,9 @@ public enum CLI {
                 print("still waiting when this command gave up")
                 print("    \(error)")
                 print("")
-                print("    The service is running and the prompts may still be on the Mac's")
-                print("    screen. Accept them, then check what actually landed:")
+                print("    The service answered, then took longer than this command waits —")
+                print("    so it is running, and the prompts may still be on the Mac's screen.")
+                print("    What the service holds right now:")
                 print("")
                 problems += CLI.reportServicePermissions(using: client)
             case .refusedOrigin, .http:

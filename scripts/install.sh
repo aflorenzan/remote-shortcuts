@@ -232,21 +232,15 @@ fi
 if (( SKIP_PREFLIGHT == 0 )); then
     if (( SERVER_UP == 1 )); then
         info "Requesting macOS permissions for the service (approve the prompts that appear)"
-        if ! "${APP_BINARY}" preflight; then
-            # Ask the service what it ended up with rather than trusting the
-            # exit status of the call that reported the problem. A prompt
-            # accepted a moment after that call stopped waiting still granted
-            # the permission, and reporting failure then is simply wrong.
-            info "Checking what the service ended up with"
-            if "${APP_BINARY}" doctor >/dev/null 2>&1; then
-                info "Permissions are in place after all"
-            else
-                warn "Some permissions are still missing. Accept the prompts if they are
-      on screen, then run:
-        remote-shortcuts preflight
-        remote-shortcuts doctor"
-            fi
-        fi
+        # No second guess at the result here: `preflight` prints what the
+        # service actually holds, including when its own request timed out, so
+        # re-deriving a verdict from `doctor`'s exit status would only add a
+        # wrong one — that status covers every check it runs, not just
+        # permissions.
+        "${APP_BINARY}" preflight || warn "The permission step did not finish. If the prompts are still on
+      screen, accept them; the service keeps whatever you grant. Then:
+        remote-shortcuts doctor        # what the service holds
+        remote-shortcuts preflight     # ask again, if anything is missing"
     else
         warn "Skipping permission prompts: the service is not running, and only the
       service can be granted anything. Start it and run 'remote-shortcuts preflight':
