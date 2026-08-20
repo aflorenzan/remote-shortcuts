@@ -17,12 +17,26 @@ struct ServiceClient {
 
     enum ClientError: Error, CustomStringConvertible {
         case unreachable(String)
+        /// The server answered and declined this address. A *running* service,
+        /// which is the opposite of what the caller concludes from a bare
+        /// failure — and concluding wrongly is what left an install with no way
+        /// to grant permissions at all.
+        case refusedOrigin(String)
         case http(status: Int, body: String)
 
         var description: String {
             switch self {
             case let .unreachable(detail): return detail
+            case let .refusedOrigin(detail): return detail
             case let .http(status, body): return "HTTP \(status): \(body)"
+            }
+        }
+
+        /// Did the server answer at all? A refusal is an answer.
+        var serviceIsRunning: Bool {
+            switch self {
+            case .unreachable: return false
+            case .refusedOrigin, .http: return true
             }
         }
     }
@@ -98,6 +112,11 @@ struct ServiceClient {
         let body = data.flatMap { try? JSON.decodeObject($0) } ?? [:]
         guard (200..<300).contains(status) else {
             let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            if status == 403, text.contains("allowed_origins") {
+                throw ClientError.refusedOrigin(
+                    "the service is running, but it refused this machine's address (allowed_origins)"
+                )
+            }
             throw ClientError.http(status: status, body: text)
         }
         return body

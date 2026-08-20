@@ -439,3 +439,75 @@ final class ServiceClientURLTests: XCTestCase {
         )
     }
 }
+
+/// Query parameters are validated the way body fields are.
+///
+/// `?calendar=RS-Test` — the parameter is `calendars` — used to return 200 with
+/// every event from every calendar. A plausible answer to a question nobody
+/// asked is worse than an error, and it spoiled a verification run before
+/// anyone noticed.
+final class UnknownQueryRejectionTests: XCTestCase {
+    private func request(_ query: [String: String]) -> HTTPRequest {
+        HTTPRequest(
+            method: "GET",
+            path: "/v1/calendars/events",
+            query: query,
+            headers: [:],
+            body: Data(),
+            remoteAddress: "127.0.0.1",
+            keepAlive: false
+        )
+    }
+
+    func testAcceptsKnownParameters() {
+        XCTAssertNoThrow(
+            try request(["start": "2026-09-01", "calendars": "RS-Test"])
+                .rejectUnknownQuery(allowed: RouteBuilder.eventQueryParameters)
+        )
+    }
+
+    func testRejectsTheSingularTypo() {
+        XCTAssertThrowsError(
+            try request(["calendar": "RS-Test"])
+                .rejectUnknownQuery(allowed: RouteBuilder.eventQueryParameters)
+        ) { error in
+            guard case let .badRequest(message)? = error as? APIError else {
+                return XCTFail("expected a 400, got \(error)")
+            }
+            XCTAssertTrue(message.contains("'calendar'"), message)
+            XCTAssertTrue(message.contains("did you mean 'calendars'"), message)
+        }
+    }
+
+    func testRejectsAnInventedParameter() {
+        XCTAssertThrowsError(
+            try request(["query": "shopping"])
+                .rejectUnknownQuery(allowed: ["folder", "q", "limit", "include_body"])
+        )
+    }
+
+    func testEmptyQueryIsFine() {
+        XCTAssertNoThrow(
+            try request([:]).rejectUnknownQuery(allowed: RouteBuilder.eventQueryParameters)
+        )
+    }
+}
+
+/// A note whose body will not fit comes back without it, rather than taking the
+/// whole request down. The 17.8 MB note that prompted this returned 413 for its
+/// title.
+final class NoteBodyOmissionTests: XCTestCase {
+    func testNoOmissionWhenTheFieldIsEmpty() {
+        XCTAssertNil(NotesService.omissionNote(""))
+        XCTAssertNil(NotesService.omissionNote("0"))
+        XCTAssertNil(NotesService.omissionNote("   "))
+    }
+
+    func testReportsTheSizeInMegabytes() {
+        guard let note = NotesService.omissionNote("17802897") else {
+            return XCTFail("a body over the budget must be reported")
+        }
+        XCTAssertTrue(note.contains("17.8 MB"), note)
+        XCTAssertTrue(note.contains("note_body_budget_bytes"), note)
+    }
+}

@@ -77,6 +77,13 @@ public struct RouteBuilder {
         }
     }
 
+    /// Query parameters each listing accepts. Kept next to the routes that use
+    /// them so adding a parameter and forgetting this cannot pass review.
+    static let eventQueryParameters: Set<String> = ["start", "end", "calendars", "q", "limit"]
+    static let reminderQueryParameters: Set<String> = [
+        "lists", "list", "completed", "due_after", "due_before", "q", "limit",
+    ]
+
     private func endpointCatalogue() -> [String] {
         var endpoints = [
             "GET /v1", "GET /v1/health",
@@ -93,6 +100,7 @@ public struct RouteBuilder {
                 "GET /v1/calendars/events/:id",
                 "PATCH /v1/calendars/events/:id",
                 "DELETE /v1/calendars/events/:id",
+                "GET /v1/diagnostics/event-resolution/:id",
             ]
         }
         if configuration.modules.reminders {
@@ -254,6 +262,7 @@ public struct RouteBuilder {
         }
 
         router.get("/v1/calendars/events") { request in
+            try request.rejectUnknownQuery(allowed: RouteBuilder.eventQueryParameters)
             // Default window: today through a week out — the range an
             // automation asks for when it does not say.
             let start = try request.queryDate("start") ?? Calendar.current.startOfDay(for: Date())
@@ -293,6 +302,7 @@ public struct RouteBuilder {
         }
 
         router.patch("/v1/calendars/events/:id") { request in
+            try request.rejectUnknownQuery(allowed: ["span"])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
                 allowed: RouteBuilder.eventUpdateFields,
@@ -312,11 +322,26 @@ public struct RouteBuilder {
         }
 
         router.delete("/v1/calendars/events/:id") { request in
+            try request.rejectUnknownQuery(allowed: ["span"])
             try eventKit.deleteEvent(
                 identifier: try request.parameter("id"),
                 span: try span(from: request.query["span"])
             )
             return .json(["deleted": true])
+        }
+
+        // Read-only, authenticated like everything else, and deliberately named
+        // as a diagnostic rather than dressed up as API surface.
+        //
+        // It answers a question that cannot be answered from outside: what
+        // `event(withIdentifier:)` returns for a composite id. All three
+        // possible answers — the occurrence, the series master, nil — make
+        // `resolve` return the same occurrence, so no external experiment can
+        // separate them, and only a process holding the calendar grant can
+        // look. This is that process.
+        router.get("/v1/diagnostics/event-resolution/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
+            return .json(try eventKit.diagnoseResolution(of: try request.parameter("id")))
         }
     }
 
@@ -360,6 +385,7 @@ public struct RouteBuilder {
         }
 
         router.get("/v1/reminders") { request in
+            try request.rejectUnknownQuery(allowed: RouteBuilder.reminderQueryParameters)
             let query = EventKitService.ReminderQuery(
                 lists: request.queryList("lists") ?? request.queryList("list"),
                 completed: try request.queryBool("completed"),
@@ -426,6 +452,7 @@ public struct RouteBuilder {
         }
 
         router.get("/v1/notes") { request in
+            try request.rejectUnknownQuery(allowed: ["folder", "q", "limit", "include_body"])
             let includeBody = try request.queryBool("include_body") ?? false
             let requestedLimit = try request.queryInt("limit")
             var limit = min(requestedLimit ?? 50, 500)
@@ -458,18 +485,37 @@ public struct RouteBuilder {
                 folder: request.query["folder"],
                 search: request.query["q"],
                 limit: limit,
-                includeBody: includeBody
+                includeBody: includeBody,
+                bodyBudgetBytes: configuration.noteBodyBudgetBytes
             )
             var payload: [String: Any] = ["notes": items, "count": items.count]
             if clamped {
                 payload["limit_applied"] = limit
                 payload["note"] = "Limited to \(limit) notes because 'include_body' was set; there may be more. Ask for them in pages, or raise 'max_notes_with_body' in the config."
             }
+            let omitted = items.filter { $0["body_omitted"] != nil }.count
+            if omitted > 0 {
+                payload["bodies_omitted"] = omitted
+            }
             return .json(payload)
         }
 
         router.get("/v1/notes/:id") { request in
-            .json(["note": try notes.note(id: try request.parameter("id"))])
+            // `include_body` is honoured here too. It used not to be, and a
+            // note of embedded images measured at 17.8 MB was consequently
+            // unreachable: the reply blew the 8 MB cap, so the request failed
+            // with 413 and returned no title, no folder and no dates either —
+            // and the error advised fetching bodies "one note at a time",
+            // which is exactly what this endpoint does.
+            try request.rejectUnknownQuery(allowed: ["include_body"])
+            let includeBody = try request.queryBool("include_body") ?? true
+            return .json([
+                "note": try notes.note(
+                    id: try request.parameter("id"),
+                    includeBody: includeBody,
+                    bodyBudgetBytes: configuration.noteBodyBudgetBytes
+                ),
+            ])
         }
 
         router.post("/v1/notes") { request in

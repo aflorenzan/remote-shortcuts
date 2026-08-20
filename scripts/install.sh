@@ -189,19 +189,35 @@ PLIST
         warn "Could not register the LaunchAgent automatically. Load it with:
       launchctl bootstrap gui/\$(id -u) ${LAUNCH_AGENT}"
 
+    # Any HTTP status means the server answered, and answering is the whole
+    # question here. Not `curl -f`: that turns a 403 into the same silence as a
+    # refused connection, and a 403 from 'allowed_origins' is a *running* server
+    # declining this address. Reading it as "not running" skipped the permission
+    # step below and left the install with no way to grant the service anything.
+    probe_status() {
+        curl -s -o /dev/null --max-time 2 -w '%{http_code}' "${ENDPOINT}/v1/health" 2>/dev/null || true
+    }
+
     info "Waiting for the server to come up"
+    STATUS=000
     for _ in $(seq 1 25); do
-        if curl -fsS --max-time 2 "${ENDPOINT}/v1/health" >/dev/null 2>&1; then
-            break
-        fi
+        STATUS="$(probe_status)"
+        [[ "${STATUS}" != "000" ]] && break
         sleep 0.4
     done
 
-    if curl -fsS --max-time 2 "${ENDPOINT}/v1/health" >/dev/null 2>&1; then
+    if [[ "${STATUS}" == "000" ]]; then
+        warn "The server did not answer on ${ENDPOINT}. Check ${LOG_DIR}/server.error.log"
+    elif [[ "${STATUS}" == "403" ]]; then
+        SERVER_UP=1
+        warn "The server is running, but it refused this machine with 403.
+      That is 'allowed_origins' in ${CONFIG_DIR}/config.json: it lists which
+      source addresses may call, and this Mac is not among them. Permissions
+      can still be requested — the prompts appear on this screen either way —
+      but ordinary calls from here will keep failing until you add its address."
+    else
         info "Server is healthy"
         SERVER_UP=1
-    else
-        warn "The server did not answer on ${ENDPOINT}. Check ${LOG_DIR}/server.error.log"
     fi
 fi
 
@@ -220,7 +236,7 @@ if (( SKIP_PREFLIGHT == 0 )); then
     else
         warn "Skipping permission prompts: the service is not running, and only the
       service can be granted anything. Start it and run 'remote-shortcuts preflight':
-      launchctl kickstart -k gui/\$(id -u) ${BUNDLE_ID}"
+      launchctl kickstart -k gui/\$(id -u)/${BUNDLE_ID}"
     fi
 fi
 
@@ -242,14 +258,14 @@ $(printf '\033[1;32mInstalled.\033[0m')
     Name: Authorization    Value: Bearer ${TOKEN}
 
 $(if (( REINSTALL == 1 )); then cat <<'REGRANT'
-  ⚠️  You reinstalled over an existing bundle. Because the signature is ad-hoc,
-      its code hash changed and macOS treats it as a new app, so Calendars and
-      Reminders permissions had to be granted again — that is what the prompts
-      during step 6 were for. Confirm they took:
+  ⚠️  You reinstalled over an existing bundle, which rebuilt the binary and so
+      changed its code hash. With an ad-hoc signature macOS may treat that as a
+      new app and forget the Calendars and Reminders grants — it does not always,
+      and guessing either way is how this notice got it wrong before. Ask:
 
         remote-shortcuts doctor        # reports what the *service* holds
 
-      If they did not, re-request them with the service running:
+      If the grants are gone, re-request them with the service running:
 
         remote-shortcuts preflight     # asks the service to prompt; approve
 

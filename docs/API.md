@@ -23,10 +23,12 @@ Authorization: Bearer <token>
 
 Output is always `2026-08-15T09:30:00.000Z`.
 
-**Unknown fields are rejected.** A body carrying a field the endpoint does not
-know gets a `400` naming it, rather than having it dropped — a typo like
-`due_date` for `due` used to produce a reminder with no due date and a `201`.
-The error suggests the intended field where it can, and lists what is accepted.
+**Unknown fields and query parameters are rejected.** A request carrying
+something the endpoint does not know gets a `400` naming it, rather than having
+it dropped — `due_date` for `due` used to produce a reminder with no due date
+and a `201`, and `?calendar=` for `?calendars=` used to return every event on
+the Mac while looking like a filtered answer. The error suggests the intended
+name where it can, and lists what is accepted.
 
 **Errors** are always shaped like this:
 
@@ -36,7 +38,7 @@ The error suggests the intended field where it can, and lists what is accepted.
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| 400 | `bad_request` | Malformed JSON, missing, wrong-typed or **unknown** field |
+| 400 | `bad_request` | Malformed JSON, missing, wrong-typed or **unknown** field or query parameter |
 | 401 | `unauthorized` | Missing or wrong token |
 | 403 | `forbidden` | Read-only mode, blocked shortcut, rejected source address |
 | 403 | `permission_denied` | macOS has not granted the needed privacy permission |
@@ -247,12 +249,13 @@ Send the composite `id` back and `span` acts from **that occurrence**:
 > composite `id` from `GET /v1/calendars/events`. Tedious, but it does exactly
 > what you asked and nothing else.
 >
-> Being investigated. The good news from the same testing: the series no longer
-> gets *shifted in time*, which was the worse symptom this replaced.
+> `DELETE` with `span=future_events` **does** work: it removes the occurrence
+> and every later one, verified on real data. It is only `PATCH` that detaches.
 
-Use the `id` you were given. The bare form is accepted for compatibility and
-behaves as it always did, which is rarely what you want: an edit with
-`future_events` against a bare id rewrites the series from its beginning.
+Use the `id` you were given. The bare form is accepted for compatibility, and
+with `future_events` it detaches its own occurrence exactly as a composite id
+does — it does **not** rewrite the series from its beginning, as this document
+claimed until it was measured.
 
 `<seconds>` is on Apple's reference date (2001-01-01), matching what EventKit
 itself emits when an occurrence is detached — so a detached occurrence's id
@@ -263,6 +266,28 @@ than silently doing nothing (`DELETE`) or recreating it (`PATCH`).
 
 ### `DELETE /v1/calendars/events/:id`
 `?span=future_events` for a series. Returns `{"deleted": true}`.
+
+---
+
+### `GET /v1/diagnostics/event-resolution/:id`
+
+Read-only. Reports what `event(withIdentifier:)` returns for an id — the
+occurrence, the series master, or nothing — plus which branch of the resolver a
+real call would take.
+
+It exists because that question cannot be answered from outside the service:
+all three possible answers make the resolver return the same occurrence, and
+only a process holding the calendar grant can look. This is that process.
+
+```json
+{
+  "requested": "…:…/RID=811710000",
+  "parsed": { "identifier": "…", "occurrence_start": "…", "is_composite": true },
+  "lookup_verbatim": { "nil": false, "start": "…", "is_detached": false, "has_recurrence_rules": true },
+  "lookup_bare": { "nil": false, "start": "…" },
+  "verdict": "verbatim lookup returned something else, most likely the series master"
+}
+```
 
 ---
 
@@ -345,8 +370,28 @@ dictionary. Two consequences worth knowing:
 > Raise `max_notes_with_body` in the config if your notes are short. Listing
 > without `include_body` is unaffected and goes up to 500.
 
+> [!NOTE]
+> **A count is not a size.** One note of embedded images measured 17.8 MB, so
+> ten notes can exceed the 8 MB buffer however small the other nine are.
+> Alongside the count cap, each reply carries a **byte budget**
+> (`note_body_budget_bytes`, 6 MB by default) spent inside the AppleScript,
+> which can measure a body without shipping it.
+>
+> A note whose body will not fit comes back with **`body_omitted`** — a sentence
+> naming the size — instead of `body`, and the reply carries `bodies_omitted`
+> with the count. The note itself, its title, folder and dates, is still there.
+> Nothing is refused because one note is large.
+
 ### `GET /v1/notes/:id`
 Returns the note including `body` (HTML) and `plain_text`.
+
+| Query | Notes |
+| --- | --- |
+| `include_body` | `false` to return metadata only — title, folder, dates |
+
+If the body is over the byte budget, `body` and `plain_text` are replaced by
+`body_omitted`. The rest of the note is returned either way: a note is never
+unreachable because it is large.
 
 ### `POST /v1/notes`
 

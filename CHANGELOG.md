@@ -16,6 +16,82 @@ which is exactly why none of it was caught earlier.
 
 ### Fixed — later rounds of runtime verification
 
+- **A 403 from `allowed_origins` read as "the service is not running", and that
+  stopped the install dead.** With the ordinary configuration — bind to the LAN
+  address, allow only n8n's — the installer's health probe used `curl -f`, so a
+  403 arrived as the same silence as a refused connection. It skipped the
+  permission step, `doctor` told the user to start a service that was already
+  running, and `preflight` said the same. Since `preflight` became the only way
+  to grant the service anything, there was no route left to finish an install.
+
+  Three fixes, because one would not do. The probe now treats **any** HTTP
+  status as proof the server answered. `doctor` and `preflight` distinguish a
+  refusal from silence and point at `allowed_origins` rather than at
+  `launchctl`. And the filter itself no longer locks a Mac out of its own
+  service: a request whose source address is the address the server bound to
+  came from this same host, and is allowed.
+
+  Also in the same messages: the `launchctl kickstart` line was missing the
+  slash between the domain and the service name, and the reinstall notice
+  claimed permissions "had to be granted again" — on the Mac they survived the
+  rebuild. It no longer asserts either way and points at `doctor`.
+
+- **`PATCH ?span=future_events` still returned 200 for an edit it did not
+  make.** The guard added for this could never fire: it asked `EKEvent.isDetached`
+  after saving, and that property is not refreshed on the in-memory object. On
+  the same object, in the same instant, `hasRecurrenceRules` *is* refreshed —
+  the response even carried `is_recurring: false` while the check read `false`
+  from `isDetached` and passed.
+
+  The check now uses two signals read after the save: recurrence rules on the
+  saved event, and whether a later occurrence still carries the pre-edit title,
+  read back out of the store. The decision is a plain function with tests, so a
+  guard that cannot fire fails the build rather than the user. `DELETE` with
+  `future_events` was and remains correct — it verified against the store all
+  along, which is the difference.
+
+  `docs/API.md` also claimed a bare id with `future_events` "rewrites the series
+  from its beginning". It does not; it detaches its own occurrence like any
+  other id. The documentation now says what was measured.
+
+- **A single large note made itself unfetchable and poisoned every listing it
+  appeared in.** One note of embedded images measured 17.8 MB — 107 characters
+  of text. `GET /v1/notes/:id` returned `413` for it, so its title, folder and
+  dates were unreachable because one field was too big, and the error advised
+  fetching bodies "one note at a time", which is what that endpoint already is.
+  `include_body=false` was ignored there. And because the cap counted notes
+  rather than bytes, any listing that happened to include that note failed —
+  slowly, at 13.5s, with the generic message.
+
+  Bodies are now budgeted in bytes (`note_body_budget_bytes`, 6 MB) and measured
+  inside the AppleScript, which can size a body without shipping it. A body that
+  will not fit is replaced by **`body_omitted`** naming the size; the note comes
+  back regardless. `include_body=false` is honoured on the detail endpoint.
+
+- **A misspelled query parameter was ignored, and the answer looked fine.**
+  `?calendar=RS-Test` — the parameter is `calendars` — returned `200` with all
+  74 events on the Mac, and quietly contaminated a verification run before
+  anyone noticed. Request bodies have rejected unknown fields since the
+  `due_date` incident; query strings now do too, with the same near-miss
+  suggestions.
+
+- **`GET /v1/notes/:id` took 1.2s where the equivalent AppleScript took 0.33s.**
+  Every property read is a round trip to Notes, and the script was making about
+  nine of them: a redundant name probe before the real one, then each field
+  separately. It now reads `properties` in a single round trip when the body is
+  wanted anyway — which also yields the container, removing the folder lookup —
+  and falls back to the old per-property path, logging `RS_PROPS_FALLBACK`, if
+  that fails.
+
+### Added
+
+- **`GET /v1/diagnostics/event-resolution/:id`**, read-only, reporting what
+  `event(withIdentifier:)` returns for an id and which branch of the resolver a
+  real call takes. The question cannot be answered from outside the service —
+  all three possible answers produce the same observable behaviour, and only a
+  process holding the calendar grant can look — so the resolver's dead branches
+  can now be removed with evidence instead of guesswork.
+
 - **Four release candidates shipped notes that omitted their own fixes.** The
   release workflow builds its notes from the CHANGELOG section matching the
   version being tagged, and everything since rc.1 had accumulated under

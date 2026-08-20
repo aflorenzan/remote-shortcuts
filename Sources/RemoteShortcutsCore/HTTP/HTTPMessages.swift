@@ -133,6 +133,34 @@ public struct HTTPRequest {
         return value
     }
 
+    /// Refuses query parameters this route does not know.
+    ///
+    /// Request bodies have rejected unknown fields since the `due_date`
+    /// incident; query strings did not, and the asymmetry was its own trap.
+    /// `?calendar=RS-Test` (the parameter is `calendars`) returned 200 with
+    /// every event from every calendar — a plausible-looking answer to a
+    /// question nobody asked, which quietly spoiled a whole verification run.
+    /// With `include_body` in play a typo also costs seconds and megabytes.
+    public func rejectUnknownQuery(allowed: Set<String>) throws {
+        let unknown = query.keys.filter { !allowed.contains($0) }.sorted()
+        guard !unknown.isEmpty else { return }
+
+        let listed = unknown.map { "'\($0)'" }.joined(separator: ", ")
+        var message = unknown.count == 1
+            ? "Unknown query parameter \(listed)."
+            : "Unknown query parameters \(listed)."
+
+        let suggestions = unknown.compactMap { name -> String? in
+            guard let match = JSONBody.closestMatch(to: name, in: allowed) else { return nil }
+            return "'\(name)' → did you mean '\(match)'?"
+        }
+        if !suggestions.isEmpty {
+            message += " " + suggestions.joined(separator: " ")
+        }
+        message += " Accepted here: \(allowed.sorted().joined(separator: ", "))."
+        throw APIError.badRequest(message)
+    }
+
     public func queryInt(_ name: String) throws -> Int? {
         guard let raw = query[name] else { return nil }
         guard let value = Int(raw) else {

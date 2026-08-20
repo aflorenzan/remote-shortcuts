@@ -46,6 +46,15 @@ public struct Configuration {
     /// done: a 50-note request spent 17 seconds before its 413. Refusing up
     /// front turns that into milliseconds.
     public var maxNotesWithBody: Int
+    /// Characters of note body one reply may carry in total.
+    ///
+    /// The count cap above is not enough on its own: a single note of embedded
+    /// images measured 17.8 MB, so ten notes can exceed the 8 MB the server
+    /// buffers however small the other nine are. This budget is spent inside
+    /// the AppleScript, which can measure a body without shipping it, and a
+    /// note whose body will not fit comes back with `body_omitted` instead of
+    /// taking the whole request down with it.
+    public var noteBodyBudgetBytes: Int
     public var rateLimitPerMinute: Int
     public var logLevel: LogLevel
     /// Reject requests whose source address is not loopback, even if the
@@ -69,6 +78,7 @@ public struct Configuration {
         maxBodyBytes: Int = 1_048_576,
         requestTimeoutSeconds: Double = 30,
         maxNotesWithBody: Int = 15,
+        noteBodyBudgetBytes: Int = 6_000_000,
         rateLimitPerMinute: Int = 120,
         logLevel: LogLevel = .info,
         loopbackOnly: Bool? = nil,
@@ -84,6 +94,7 @@ public struct Configuration {
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeoutSeconds = requestTimeoutSeconds
         self.maxNotesWithBody = maxNotesWithBody
+        self.noteBodyBudgetBytes = noteBodyBudgetBytes
         self.rateLimitPerMinute = rateLimitPerMinute
         self.logLevel = logLevel
         self.loopbackOnly = loopbackOnly ?? Configuration.isLoopback(host)
@@ -227,6 +238,7 @@ public enum ConfigurationLoader {
         let maxBody = try body.optionalInt("max_body_bytes") ?? 1_048_576
         let requestTimeout = try body.optionalDouble("request_timeout_seconds") ?? 30
         let maxNotesWithBody = try body.optionalInt("max_notes_with_body") ?? 15
+        let noteBodyBudget = try body.optionalInt("note_body_budget_bytes") ?? 6_000_000
         let rateLimit = try body.optionalInt("rate_limit_per_minute") ?? 120
         let fileLogLevel = LogLevel.parse(try body.optionalString("log_level"))
         let logLevel = LogLevel.parse(environment["REMOTE_SHORTCUTS_LOG_LEVEL"]) ?? fileLogLevel ?? .info
@@ -241,6 +253,7 @@ public enum ConfigurationLoader {
             maxBodyBytes: maxBody,
             requestTimeoutSeconds: requestTimeout,
             maxNotesWithBody: maxNotesWithBody,
+            noteBodyBudgetBytes: noteBodyBudget,
             rateLimitPerMinute: rateLimit,
             logLevel: logLevel,
             loopbackOnly: loopbackOnly,
