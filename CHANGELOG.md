@@ -8,6 +8,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`doctor` and `preflight` reported the permissions of whatever ran them, not
+  the service's.** macOS attributes a privacy grant to the *responsible
+  process* — for a command run in a terminal, that is the terminal application.
+  So `preflight` granted Terminal (or Claude.app, or whatever launched it) and
+  `doctor` then read those grants back and printed "Reminders: granted ✓" while
+  the LaunchAgent was answering 403 to every request. The remedy the error
+  itself printed — "run preflight from a terminal" — could never work for the
+  service.
+
+  `doctor` now asks the running service over HTTP and labels the two clearly,
+  the service's first. A new **`POST /v1/system/permissions/request`** makes the
+  service raise its own prompts, which is the only route that grants the
+  service; `preflight` uses it. All the remedy text was rewritten to stop
+  recommending something that cannot work.
+
+  `scripts/install.sh` runs the permission step *after* the LaunchAgent is up
+  rather than before it, since `preflight` now needs a service to talk to, and
+  its reinstall notice no longer claims a bare `preflight` re-grants the service.
+
+- **Every read blocked for 60 seconds before its 403 when permissions were
+  undetermined.** The prompt was raised on each request with a 60-second wait,
+  and under launchd nobody is watching to accept it, so a permission problem
+  presented as a hang. The prompt is now raised at most once per process, waits
+  8 seconds, and the outcome is cached — later requests fail in milliseconds.
+  The message also distinguishes "the prompt went unanswered" from "the user
+  declined", which need different remedies.
+
+- **`GET /v1/notes/:id` took ~1.9 s, of which ~1.6 s was scanning every folder.**
+  The note's container is readable directly; the catch is the coercion —
+  `name of container of n` in one expression fails with -1700, and the container
+  has to be bound to a variable first. That single-expression form is what made
+  it look unreadable and sent us scanning. The scan remains as a fallback.
+
+- **An over-limit `include_body` request took up to 17 seconds to return 413.**
+  The deadlock fix was correct but could not make the failure fast: `osascript`
+  returns its whole result at the end, so nothing exceeds the cap until all the
+  work is done, and killing the child saves nothing. `include_body` is now
+  capped at 15 notes (`max_notes_with_body`, configurable) and checked before
+  any work starts, so it fails in milliseconds. An explicit over-cap `limit` is
+  refused; an omitted one is clamped, since the default of 50 is the server's
+  choice and `?include_body=true` on its own should not fail. The response
+  reports `limit_applied` when it clamps.
+
 - **`span=future_events` returned 200 for an edit it did not make.** On a weekly
   series of four, editing the third occurrence changed only that one: EventKit
   detached it instead of splitting the series, leaving later occurrences

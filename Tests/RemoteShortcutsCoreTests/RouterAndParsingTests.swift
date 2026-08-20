@@ -414,3 +414,28 @@ final class UnknownFieldRejectionTests: XCTestCase {
         XCTAssertNil(JSONBody.closestMatch(to: "zzzzzzzz", in: reminderFields))
     }
 }
+
+/// `doctor` and `preflight` reach the service over HTTP, and the router treats
+/// an empty leading path segment as real — it has to, for note ids containing
+/// "//". So a base URL and a path have to join to exactly one slash, whatever
+/// slashes each of them already carries.
+final class ServiceClientURLTests: XCTestCase {
+    private func join(_ base: String, _ path: String) -> String? {
+        ServiceClient.url(base: URL(string: base)!, path: path)?.absoluteString
+    }
+
+    func testJoinsToASingleSlash() {
+        XCTAssertEqual(
+            join("http://127.0.0.1:8787", "/v1/system/permissions/request"),
+            "http://127.0.0.1:8787/v1/system/permissions/request"
+        )
+        XCTAssertEqual(
+            join("http://127.0.0.1:8787/", "/v1/system/permissions"),
+            "http://127.0.0.1:8787/v1/system/permissions"
+        )
+        XCTAssertEqual(
+            join("http://127.0.0.1:8787", "v1/health"),
+            "http://127.0.0.1:8787/v1/health"
+        )
+    }
+}

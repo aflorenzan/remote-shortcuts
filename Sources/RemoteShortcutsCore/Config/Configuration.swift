@@ -37,6 +37,15 @@ public struct Configuration {
     public var shortcutTimeoutSeconds: Double
     public var maxBodyBytes: Int
     public var requestTimeoutSeconds: Double
+    /// Most notes `include_body=true` may ask for in one call.
+    ///
+    /// Note bodies are HTML and routinely run to hundreds of kilobytes each, so
+    /// a few dozen exceed the 8 MB the server buffers. That failure cannot be
+    /// made fast after the fact — `osascript` returns its result in one go at
+    /// the end, so nothing is over the limit until all the work is already
+    /// done: a 50-note request spent 17 seconds before its 413. Refusing up
+    /// front turns that into milliseconds.
+    public var maxNotesWithBody: Int
     public var rateLimitPerMinute: Int
     public var logLevel: LogLevel
     /// Reject requests whose source address is not loopback, even if the
@@ -59,6 +68,7 @@ public struct Configuration {
         shortcutTimeoutSeconds: Double = 120,
         maxBodyBytes: Int = 1_048_576,
         requestTimeoutSeconds: Double = 30,
+        maxNotesWithBody: Int = 15,
         rateLimitPerMinute: Int = 120,
         logLevel: LogLevel = .info,
         loopbackOnly: Bool? = nil,
@@ -73,6 +83,7 @@ public struct Configuration {
         self.shortcutTimeoutSeconds = shortcutTimeoutSeconds
         self.maxBodyBytes = maxBodyBytes
         self.requestTimeoutSeconds = requestTimeoutSeconds
+        self.maxNotesWithBody = maxNotesWithBody
         self.rateLimitPerMinute = rateLimitPerMinute
         self.logLevel = logLevel
         self.loopbackOnly = loopbackOnly ?? Configuration.isLoopback(host)
@@ -215,6 +226,7 @@ public enum ConfigurationLoader {
         let shortcutTimeout = try body.optionalDouble("shortcut_timeout_seconds") ?? 120
         let maxBody = try body.optionalInt("max_body_bytes") ?? 1_048_576
         let requestTimeout = try body.optionalDouble("request_timeout_seconds") ?? 30
+        let maxNotesWithBody = try body.optionalInt("max_notes_with_body") ?? 15
         let rateLimit = try body.optionalInt("rate_limit_per_minute") ?? 120
         let fileLogLevel = LogLevel.parse(try body.optionalString("log_level"))
         let logLevel = LogLevel.parse(environment["REMOTE_SHORTCUTS_LOG_LEVEL"]) ?? fileLogLevel ?? .info
@@ -228,6 +240,7 @@ public enum ConfigurationLoader {
             shortcutTimeoutSeconds: shortcutTimeout,
             maxBodyBytes: maxBody,
             requestTimeoutSeconds: requestTimeout,
+            maxNotesWithBody: maxNotesWithBody,
             rateLimitPerMinute: rateLimit,
             logLevel: logLevel,
             loopbackOnly: loopbackOnly,

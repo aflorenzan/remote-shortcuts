@@ -566,7 +566,8 @@ private enum Scripts {
         if folderHint is not "" then
             set folderName to folderHint
         else
-            set folderName to my folderContaining(noteID)
+            set folderName to my folderOf(theNote)
+            if folderName is "" then set folderName to my folderContaining(noteID)
         end if
 
         return noteID & fieldSep & noteName & fieldSep & folderName & fieldSep & ¬
@@ -574,6 +575,26 @@ private enum Scripts {
             noteBody & fieldSep & notePlain & recordSep
     end run
 
+    -- Reads the note's container directly. ~0.35s against ~1.9s for the scan.
+    --
+    -- The binding matters: `name of container of n` in one expression fails
+    -- with -1700, "Can't make name of «class cntr» ... into type Unicode
+    -- text". The container has to be bound to a variable first and coerced
+    -- separately. That single-expression form is why this looked unreadable
+    -- and sent us scanning every folder instead.
+    on folderOf(theNote)
+        set folderName to ""
+        try
+            tell application "Notes"
+                set theContainer to container of theNote
+                set folderName to ((name of theContainer) as text)
+            end tell
+        end try
+        return folderName
+    end folderOf
+
+    -- Fallback only, for when `container` cannot be read at all. Costs one
+    -- request per folder and stops at the first match.
     on folderContaining(noteID)
         tell application "Notes"
             set accountCount to (count of accounts)

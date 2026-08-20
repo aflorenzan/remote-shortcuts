@@ -140,6 +140,18 @@ final class ConfigurationTests: XCTestCase {
         XCTAssertEqual(result.configuration.token, token)
     }
 
+    /// The `include_body` cap is the difference between a 413 in milliseconds
+    /// and one after 17 seconds, so it has to survive being configured.
+    func testMaxNotesWithBodyDefaultsAndIsConfigurable() throws {
+        try writeConfig(["token": TokenGenerator.generate()])
+        let byDefault = try withConfigDir { try ConfigurationLoader.load(environment: environment()) }
+        XCTAssertEqual(byDefault.configuration.maxNotesWithBody, 15)
+
+        try writeConfig(["token": TokenGenerator.generate(), "max_notes_with_body": 40])
+        let configured = try withConfigDir { try ConfigurationLoader.load(environment: environment()) }
+        XCTAssertEqual(configured.configuration.maxNotesWithBody, 40)
+    }
+
     func testInitWritesConfigWithMode600() throws {
         try withConfigDir {
             // quiet: the generated token must not land in the CI log.
