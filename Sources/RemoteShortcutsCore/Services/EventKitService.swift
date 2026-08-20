@@ -495,6 +495,67 @@ public final class EventKitService: @unchecked Sendable {
         return ResolvedEvent(event: occurrence, pinnedToOccurrence: true)
     }
 
+    /// Reports what the identifier lookups actually return for an id.
+    ///
+    /// Read-only, and it exists because the question cannot be answered from
+    /// outside the service. `event(withIdentifier:)` with a composite id might
+    /// return the occurrence, the series master, or nil — and all three make
+    /// `resolve` hand back the same occurrence, so no experiment against the
+    /// public API can tell them apart. Only a process holding the calendar
+    /// grant can look, and that process is this one.
+    ///
+    /// Whichever branch turns out to be dead can then be deleted with evidence
+    /// rather than by guess.
+    public func diagnoseResolution(of raw: String) throws -> [String: Any] {
+        try requireAccess(.event)
+        return try sync { store in
+            let reference = EventReference.parse(raw)
+
+            func describe(_ event: EKEvent?) -> [String: Any] {
+                guard let event else { return ["nil": true] }
+                return [
+                    "nil": false,
+                    "identifier": event.eventIdentifier ?? "",
+                    "start": event.startDate.map(DateParsing.format) ?? "",
+                    "title": event.title ?? "",
+                    "is_detached": event.isDetached,
+                    "has_recurrence_rules": event.hasRecurrenceRules,
+                ]
+            }
+
+            let verbatim = store.event(withIdentifier: raw)
+            let bare = store.event(withIdentifier: reference.identifier)
+
+            // Which branch of `resolve` a real call would take, named the same
+            // way the source names them.
+            let verdict: String
+            if let verbatim {
+                if let wantedStart = reference.occurrenceStart {
+                    let actualStart = verbatim.startDate ?? .distantPast
+                    verdict = abs(actualStart.timeIntervalSince(wantedStart)) < 1
+                        ? "verbatim lookup returned the occurrence"
+                        : "verbatim lookup returned something else, most likely the series master"
+                } else {
+                    verdict = "verbatim lookup returned an event; the id named no occurrence"
+                }
+            } else {
+                verdict = "verbatim lookup returned nil, so resolve falls through to the occurrence query"
+            }
+
+            return [
+                "requested": raw,
+                "parsed": [
+                    "identifier": reference.identifier,
+                    "occurrence_start": reference.occurrenceStart.map(DateParsing.format) ?? "",
+                    "is_composite": reference.occurrenceStart != nil,
+                ],
+                "lookup_verbatim": describe(verbatim),
+                "lookup_bare": describe(bare),
+                "verdict": verdict,
+            ]
+        }
+    }
+
     public struct EventDraft {
         public var title: String?
         public var start: Date?
@@ -559,8 +620,13 @@ public final class EventKitService: @unchecked Sendable {
                 preferOccurrenceQuery: span == .futureEvents
             )
             let event = resolved.event
-            let wasDetached = event.isDetached
             let wasRecurring = event.hasRecurrenceRules
+            let seriesIdentifier = event.eventIdentifier.map(EventReference.baseIdentifier(of:))
+            let editStart = event.startDate
+            let editCalendar = event.calendar
+            // Kept to tell a split from a detachment afterwards: a later
+            // occurrence still wearing the old title proves nothing was split.
+            let titleBeforeEdit = event.title
             guard event.calendar?.allowsContentModifications ?? false else {
                 throw APIError.forbidden("Event belongs to a read-only calendar.")
             }
@@ -601,12 +667,27 @@ public final class EventKitService: @unchecked Sendable {
 
             // Confirm EventKit did what was asked rather than something else.
             //
-            // A `.futureEvents` save on a series was observed *detaching* the
-            // single occurrence instead of splitting the series: the later
-            // occurrences kept their old values while the call returned 200.
-            // Reporting success for an operation that did something different
-            // is worse than failing, so detect it and say so.
-            if span == .futureEvents, wasRecurring, !wasDetached, event.isDetached {
+            // A `.futureEvents` save on a series detaches the single occurrence
+            // instead of splitting the series: the later occurrences keep their
+            // old values while the call returns 200. Reporting success for an
+            // operation that did something else is worse than failing.
+            //
+            // The first version of this check asked `event.isDetached` after
+            // the save and never once fired, because that property is not
+            // refreshed on the in-memory object — it still reads what it read
+            // before. `hasRecurrenceRules` on the very same object *is*
+            // refreshed, and the store can be queried outright, so the check
+            // now uses those two and never the stale flag.
+            if span == .futureEvents, wasRecurring,
+               self.futureEventsOnlyDetached(
+                   savedEvent: event,
+                   seriesIdentifier: seriesIdentifier,
+                   editStart: editStart,
+                   calendar: editCalendar,
+                   titleBeforeEdit: titleBeforeEdit,
+                   newTitle: draft.title,
+                   in: store
+               ) {
                 throw APIError.upstreamFailure(
                     "Calendar applied this edit to one occurrence only, not to this and all later ones. "
                         + "EventKit detached the occurrence instead of splitting the series, so the later "
@@ -737,6 +818,55 @@ public final class EventKitService: @unchecked Sendable {
         return store.events(matching: predicate).contains { candidate in
             EventReference.baseIdentifier(of: candidate.eventIdentifier ?? "") == identifier
         }
+    }
+
+    /// Did a `.futureEvents` save detach one occurrence instead of splitting
+    /// the series?
+    ///
+    /// Two independent signals, because the obvious one lies:
+    ///
+    /// 1. **The saved event lost its recurrence rules.** A split leaves this
+    ///    event as the master of the new series, so it keeps them; a detached
+    ///    occurrence is a standalone event and has none. Measured on real data:
+    ///    on the same object, in the same instant, `isDetached` was stale and
+    ///    `hasRecurrenceRules` was current.
+    /// 2. **A later occurrence still wears the old title.** Read back out of
+    ///    the store, so no in-memory staleness can reach it. Deliberately not
+    ///    "the old series still has occurrences after this date": if EventKit
+    ///    ever does split while keeping the series identifier, that phrasing
+    ///    would call a correct split a failure. Whether the later occurrences
+    ///    actually changed is the question being asked, so ask that.
+    ///
+    /// Either is enough. Signal 2 only applies when the caller edited the
+    /// title, which is the only field cheap to compare here; signal 1 carries
+    /// the rest.
+    private func futureEventsOnlyDetached(
+        savedEvent: EKEvent,
+        seriesIdentifier: String?,
+        editStart: Date?,
+        calendar: EKCalendar?,
+        titleBeforeEdit: String?,
+        newTitle: String?,
+        in store: EKEventStore
+    ) -> Bool {
+        var laterOccurrenceKeptOldTitle = false
+        if let seriesIdentifier, let editStart,
+           let newTitle, let titleBeforeEdit, newTitle != titleBeforeEdit {
+            let predicate = store.predicateForEvents(
+                withStart: editStart.addingTimeInterval(1),
+                end: editStart.addingTimeInterval(365 * 24 * 3600),
+                calendars: calendar.map { [$0] }
+            )
+            laterOccurrenceKeptOldTitle = store.events(matching: predicate).contains { candidate in
+                EventReference.baseIdentifier(of: candidate.eventIdentifier ?? "") == seriesIdentifier
+                    && candidate.title == titleBeforeEdit
+            }
+        }
+
+        return SpanOutcome.detachedInsteadOfSplit(
+            savedEventStillRecurring: savedEvent.hasRecurrenceRules,
+            laterOccurrenceKeptOldTitle: laterOccurrenceKeptOldTitle
+        )
     }
 
     /// Whether the occurrence is really there.

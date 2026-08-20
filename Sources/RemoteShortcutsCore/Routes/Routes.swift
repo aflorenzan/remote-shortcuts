@@ -77,6 +77,13 @@ public struct RouteBuilder {
         }
     }
 
+    /// Query parameters each listing accepts. Kept next to the routes that use
+    /// them so adding a parameter and forgetting this cannot pass review.
+    static let eventQueryParameters: Set<String> = ["start", "end", "calendars", "q", "limit"]
+    static let reminderQueryParameters: Set<String> = [
+        "lists", "list", "completed", "due_after", "due_before", "q", "limit",
+    ]
+
     private func endpointCatalogue() -> [String] {
         var endpoints = [
             "GET /v1", "GET /v1/health",
@@ -93,6 +100,7 @@ public struct RouteBuilder {
                 "GET /v1/calendars/events/:id",
                 "PATCH /v1/calendars/events/:id",
                 "DELETE /v1/calendars/events/:id",
+                "GET /v1/diagnostics/event-resolution/:id",
             ]
         }
         if configuration.modules.reminders {
@@ -154,7 +162,8 @@ public struct RouteBuilder {
     // MARK: - Shortcuts
 
     private func registerShortcuts(_ router: Router) {
-        router.get("/v1/shortcuts") { _ in
+        router.get("/v1/shortcuts") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let items = try shortcuts.list()
             return .json([
                 "shortcuts": items,
@@ -166,6 +175,7 @@ public struct RouteBuilder {
         // Running a shortcut is a POST because it has side effects, even
         // though it reads like a lookup.
         router.post("/v1/shortcuts/run") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(allowed: RouteBuilder.shortcutFields)
             return try runShortcut(name: try body.nonEmptyString("name"), body: body)
@@ -173,6 +183,7 @@ public struct RouteBuilder {
 
         // Convenience form so an n8n HTTP node can put the name in the URL.
         router.post("/v1/shortcuts/:name/run") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = (try? request.jsonBody()) ?? JSONBody([:])
             // `name` comes from the path here, so a body `name` would be a
             // second, possibly contradictory source. Reject rather than guess.
@@ -248,12 +259,14 @@ public struct RouteBuilder {
     // MARK: - Calendars
 
     private func registerCalendars(_ router: Router) {
-        router.get("/v1/calendars") { _ in
+        router.get("/v1/calendars") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let calendars = try eventKit.listCalendars(entity: .event)
             return .json(["calendars": calendars, "count": calendars.count])
         }
 
         router.get("/v1/calendars/events") { request in
+            try request.rejectUnknownQuery(allowed: RouteBuilder.eventQueryParameters)
             // Default window: today through a week out — the range an
             // automation asks for when it does not say.
             let start = try request.queryDate("start") ?? Calendar.current.startOfDay(for: Date())
@@ -274,10 +287,12 @@ public struct RouteBuilder {
         }
 
         router.get("/v1/calendars/events/:id") { request in
-            .json(["event": try eventKit.event(withIdentifier: try request.parameter("id"))])
+            try request.rejectUnknownQuery(allowed: [])
+            return .json(["event": try eventKit.event(withIdentifier: try request.parameter("id"))])
         }
 
         router.post("/v1/calendars/events") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
                 allowed: RouteBuilder.eventCreateFields,
@@ -293,6 +308,7 @@ public struct RouteBuilder {
         }
 
         router.patch("/v1/calendars/events/:id") { request in
+            try request.rejectUnknownQuery(allowed: ["span"])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(
                 allowed: RouteBuilder.eventUpdateFields,
@@ -312,11 +328,26 @@ public struct RouteBuilder {
         }
 
         router.delete("/v1/calendars/events/:id") { request in
+            try request.rejectUnknownQuery(allowed: ["span"])
             try eventKit.deleteEvent(
                 identifier: try request.parameter("id"),
                 span: try span(from: request.query["span"])
             )
             return .json(["deleted": true])
+        }
+
+        // Read-only, authenticated like everything else, and deliberately named
+        // as a diagnostic rather than dressed up as API surface.
+        //
+        // It answers a question that cannot be answered from outside: what
+        // `event(withIdentifier:)` returns for a composite id. All three
+        // possible answers — the occurrence, the series master, nil — make
+        // `resolve` return the same occurrence, so no external experiment can
+        // separate them, and only a process holding the calendar grant can
+        // look. This is that process.
+        router.get("/v1/diagnostics/event-resolution/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
+            return .json(try eventKit.diagnoseResolution(of: try request.parameter("id")))
         }
     }
 
@@ -354,12 +385,14 @@ public struct RouteBuilder {
     // MARK: - Reminders
 
     private func registerReminders(_ router: Router) {
-        router.get("/v1/reminders/lists") { _ in
+        router.get("/v1/reminders/lists") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let lists = try eventKit.listCalendars(entity: .reminder)
             return .json(["lists": lists, "count": lists.count])
         }
 
         router.get("/v1/reminders") { request in
+            try request.rejectUnknownQuery(allowed: RouteBuilder.reminderQueryParameters)
             let query = EventKitService.ReminderQuery(
                 lists: request.queryList("lists") ?? request.queryList("list"),
                 completed: try request.queryBool("completed"),
@@ -373,6 +406,7 @@ public struct RouteBuilder {
         }
 
         router.post("/v1/reminders") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
@@ -382,6 +416,7 @@ public struct RouteBuilder {
         }
 
         router.patch("/v1/reminders/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(allowed: RouteBuilder.reminderFields)
             var draft = EventKitService.ReminderDraft()
@@ -393,12 +428,14 @@ public struct RouteBuilder {
         // Completing is the single most common automation, so it gets a verb
         // of its own rather than requiring a PATCH body.
         router.post("/v1/reminders/:id/complete") { request in
+            try request.rejectUnknownQuery(allowed: [])
             var draft = EventKitService.ReminderDraft()
             draft.completed = true
             return .json(["reminder": try eventKit.updateReminder(identifier: try request.parameter("id"), draft: draft)])
         }
 
         router.delete("/v1/reminders/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
             try eventKit.deleteReminder(identifier: try request.parameter("id"))
             return .json(["deleted": true])
         }
@@ -420,12 +457,14 @@ public struct RouteBuilder {
     // MARK: - Notes
 
     private func registerNotes(_ router: Router) {
-        router.get("/v1/notes/folders") { _ in
+        router.get("/v1/notes/folders") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let folders = try notes.listFolders()
             return .json(["folders": folders, "count": folders.count])
         }
 
         router.get("/v1/notes") { request in
+            try request.rejectUnknownQuery(allowed: ["folder", "q", "limit", "include_body"])
             let includeBody = try request.queryBool("include_body") ?? false
             let requestedLimit = try request.queryInt("limit")
             var limit = min(requestedLimit ?? 50, 500)
@@ -465,14 +504,32 @@ public struct RouteBuilder {
                 payload["limit_applied"] = limit
                 payload["note"] = "Limited to \(limit) notes because 'include_body' was set; there may be more. Ask for them in pages, or raise 'max_notes_with_body' in the config."
             }
+            let omitted = items.filter { $0["body_omitted"] != nil }.count
+            if omitted > 0 {
+                payload["bodies_omitted"] = omitted
+            }
             return .json(payload)
         }
 
         router.get("/v1/notes/:id") { request in
-            .json(["note": try notes.note(id: try request.parameter("id"))])
+            // `include_body` is honoured here too. It used not to be, and a
+            // note of embedded images measured at 17.8 MB was consequently
+            // unreachable: the reply blew the 8 MB cap, so the request failed
+            // with 413 and returned no title, no folder and no dates either —
+            // and the error advised fetching bodies "one note at a time",
+            // which is exactly what this endpoint does.
+            try request.rejectUnknownQuery(allowed: ["include_body"])
+            let includeBody = try request.queryBool("include_body") ?? true
+            return .json([
+                "note": try notes.note(
+                    id: try request.parameter("id"),
+                    includeBody: includeBody
+                ),
+            ])
         }
 
         router.post("/v1/notes") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(allowed: RouteBuilder.noteCreateFields)
             let format = try body.optionalString("format")?.lowercased() ?? "text"
@@ -489,6 +546,7 @@ public struct RouteBuilder {
         }
 
         router.patch("/v1/notes/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
             let body = try request.jsonBody()
             try body.rejectUnknownFields(allowed: RouteBuilder.noteUpdateFields)
             var edit = NotesService.NoteEdit()
@@ -508,6 +566,7 @@ public struct RouteBuilder {
         }
 
         router.delete("/v1/notes/:id") { request in
+            try request.rejectUnknownQuery(allowed: [])
             try notes.deleteNote(id: try request.parameter("id"))
             return .json(["deleted": true])
         }

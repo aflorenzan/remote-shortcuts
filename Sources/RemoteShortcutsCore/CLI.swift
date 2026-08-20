@@ -242,6 +242,15 @@ public enum CLI {
                 if state != "granted" { problems += 1 }
             }
             if let note = body["note"] as? String { print("    \(note)") }
+        } catch let error as ServiceClient.ClientError where error.serviceIsRunning {
+            print("the service refused this request")
+            print("    \(error)")
+            print("")
+            print("    The service is running — this is not a start-it problem. Add this")
+            print("    Mac's address to 'allowed_origins' in \(ConfigPaths.configFile.path),")
+            print("    or remove the list to accept any address the token authenticates,")
+            print("    then restart the service and run preflight again.")
+            problems += 1
         } catch {
             print("could not reach the service")
             print("    \(error)")
@@ -385,6 +394,15 @@ public enum CLI {
                     print("  A prompt raised any other way from a terminal is granted to the")
                     print("  terminal app, which leaves the service with nothing.")
                 }
+            } catch let error as ServiceClient.ClientError where error.serviceIsRunning {
+                // Answering, even to refuse, proves the service is up. Telling
+                // the reader to start it would send them after the wrong thing.
+                print("  the service is running but refused this request:")
+                print("    \(error)")
+                print("  Add this Mac's address to 'allowed_origins' in")
+                print("  \(ConfigPaths.configFile.path), or remove the list entirely,")
+                print("  then restart the service.")
+                problems += 1
             } catch {
                 print("  could not ask the service: \(error)")
                 print("  Start it, then run doctor again:")

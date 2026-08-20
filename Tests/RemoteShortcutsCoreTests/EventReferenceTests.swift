@@ -125,3 +125,44 @@ final class EventReferenceTests: XCTestCase {
         XCTAssertEqual(payload?["id"] as? String, composite)
     }
 }
+
+/// The `future_events` guard.
+///
+/// The version this replaces asked `EKEvent.isDetached` after saving. That
+/// property is not refreshed on the in-memory object, so the guard never fired
+/// once in production while the unit tests stayed green — the tests never
+/// touched it. These cover the decision itself, on values read after the save.
+final class SpanOutcomeTests: XCTestCase {
+    /// What the Mac actually observed: the saved occurrence comes back with no
+    /// recurrence rules, and the later occurrences are untouched.
+    func testDetachedWhenSavedEventLostItsRecurrence() {
+        XCTAssertTrue(
+            SpanOutcome.detachedInsteadOfSplit(
+                savedEventStillRecurring: false,
+                laterOccurrenceKeptOldTitle: false
+            )
+        )
+    }
+
+    /// A later occurrence still wearing the old title proves nothing split,
+    /// whatever the saved event claims about itself.
+    func testDetachedWhenALaterOccurrenceKeptTheOldTitle() {
+        XCTAssertTrue(
+            SpanOutcome.detachedInsteadOfSplit(
+                savedEventStillRecurring: true,
+                laterOccurrenceKeptOldTitle: true
+            )
+        )
+    }
+
+    /// A real split: this event heads the new series, and no later occurrence
+    /// kept the old value. Must not report failure for an edit that worked.
+    func testSplitIsNotReportedAsDetached() {
+        XCTAssertFalse(
+            SpanOutcome.detachedInsteadOfSplit(
+                savedEventStillRecurring: true,
+                laterOccurrenceKeptOldTitle: false
+            )
+        )
+    }
+}

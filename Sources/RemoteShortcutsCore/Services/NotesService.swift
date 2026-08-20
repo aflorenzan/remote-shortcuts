@@ -24,8 +24,16 @@ public final class NotesService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.remoteshortcuts.notes")
     private let timeout: Double
 
-    public init(timeout: Double = 30) {
+    /// Characters of note body one reply may carry.
+    ///
+    /// Held here rather than passed per call, so `POST` and `PATCH` — which
+    /// return the note they just wrote — honour the same configured budget as
+    /// `GET`. Threading it through each call site is how they came to differ.
+    private let bodyBudgetBytes: Int
+
+    public init(timeout: Double = 30, bodyBudgetBytes: Int = 6_000_000) {
         self.timeout = timeout
+        self.bodyBudgetBytes = bodyBudgetBytes
     }
 
     // MARK: - Script runner
@@ -49,7 +57,7 @@ public final class NotesService: @unchecked Sendable {
                     // Almost always `include_body=true` over a folder of long
                     // notes: the bodies alone can run to megabytes.
                     throw APIError.payloadTooLarge(
-                        "Apple Notes returned more than \(limitBytes / (1024 * 1024)) MB, more than this server will buffer. Lower 'limit', or drop 'include_body' and fetch the bodies you need one note at a time."
+                        "Apple Notes returned more than \(limitBytes / (1024 * 1024)) MB, more than this server will buffer. Bodies are normally budgeted before they are fetched, so reaching this means a single note is larger than 'note_body_budget_bytes' allows for — add '?include_body=false' to get the note's metadata without it, or lower 'limit' on a listing."
                     )
                 default:
                     throw APIError.upstreamFailure(error.description)
@@ -154,10 +162,18 @@ public final class NotesService: @unchecked Sendable {
 
     // MARK: - Notes
 
-    public func listNotes(folder: String?, search: String?, limit: Int, includeBody: Bool) throws -> [[String: Any]] {
+    public func listNotes(
+        folder: String?,
+        search: String?,
+        limit: Int,
+        includeBody: Bool
+    ) throws -> [[String: Any]] {
         let output = try run(
             Scripts.listNotes,
-            [folder ?? "", search ?? "", String(max(1, min(limit, 500))), includeBody ? "1" : "0"]
+            [
+                folder ?? "", search ?? "", String(max(1, min(limit, 500))),
+                includeBody ? "1" : "0", String(max(0, bodyBudgetBytes)),
+            ]
         )
         return NotesService.parseRecords(output).map { record in
             var payload: [String: Any] = [
@@ -168,10 +184,27 @@ public final class NotesService: @unchecked Sendable {
                 "modified": NotesService.appleDate(NotesService.field(record, 4)),
             ]
             if includeBody {
-                payload["body"] = NotesService.field(record, 5)
+                if let omitted = NotesService.omissionNote(NotesService.field(record, 6)) {
+                    payload["body_omitted"] = omitted
+                } else {
+                    payload["body"] = NotesService.field(record, 5)
+                }
             }
             return payload
         }
+    }
+
+    /// Turns the script's character count into something worth reading, or nil
+    /// when nothing was omitted.
+    static func omissionNote(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let characters = Int(trimmed), characters > 0 else { return nil }
+        let megabytes = Double(characters) / 1_000_000
+        return String(
+            format: "Body omitted: roughly %.1f MB, more than this server returns in one reply. "
+                + "Open the note in Notes.app, or raise 'note_body_budget_bytes' in the config.",
+            megabytes
+        )
     }
 
     /// `folderHint` skips the folder scan.
@@ -180,20 +213,33 @@ public final class NotesService: @unchecked Sendable {
     /// roughly as much as `GET /v1/notes/folders` (~2.4s on a 43-folder
     /// library). `createNote` already knows the folder, so making it pay that
     /// again would have doubled the cost of a create for no information.
-    public func note(id: String, folderHint: String? = nil) throws -> [String: Any] {
-        let output = try run(Scripts.getNote, [id, folderHint ?? ""])
+    public func note(
+        id: String,
+        folderHint: String? = nil,
+        includeBody: Bool = true
+    ) throws -> [String: Any] {
+        let output = try run(
+            Scripts.getNote,
+            [id, folderHint ?? "", includeBody ? "1" : "0", String(max(0, bodyBudgetBytes))]
+        )
         guard let record = NotesService.parseRecords(output).first else {
             throw APIError.notFound("No note with id '\(id)'")
         }
-        return [
+        var payload: [String: Any] = [
             "id": NotesService.field(record, 0),
             "title": NotesService.field(record, 1),
             "folder": NotesService.field(record, 2),
             "created": NotesService.appleDate(NotesService.field(record, 3)),
             "modified": NotesService.appleDate(NotesService.field(record, 4)),
-            "body": NotesService.field(record, 5),
-            "plain_text": NotesService.field(record, 6),
         ]
+        guard includeBody else { return payload }
+        if let omitted = NotesService.omissionNote(NotesService.field(record, 7)) {
+            payload["body_omitted"] = omitted
+        } else {
+            payload["body"] = NotesService.field(record, 5)
+            payload["plain_text"] = NotesService.field(record, 6)
+        }
+        return payload
     }
 
     /// `body` is HTML — Notes stores rich text and renders the markup it is
@@ -406,6 +452,10 @@ private enum Scripts {
         set searchText to item 2 of argv
         set maxCount to (item 3 of argv) as integer
         set wantBody to ((item 4 of argv) is "1")
+        -- Characters of note body this run may return in total. Measured here,
+        -- inside osascript, because the reply is written in one go at the end:
+        -- by the time the pipe knows it is too big, all the work is done.
+        set budgetLeft to (item 5 of argv) as integer
 
         set output to ""
         set emitted to 0
@@ -499,13 +549,27 @@ private enum Scripts {
 
                                 repeat with k from 1 to wanted
                                     set bodyField to ""
+                                    set omitField to ""
                                     if wantBody and (k ≤ (count of bodyList)) then
-                                        set bodyField to ((item k of bodyList) as text)
+                                        set candidateBody to ((item k of bodyList) as text)
+                                        set bodyLen to (count of candidateBody)
+                                        -- One note can be larger than the whole
+                                        -- budget: a single note of embedded
+                                        -- images measured 17.8 MB. Skipping its
+                                        -- body keeps the other notes, and the
+                                        -- caller is told which one and why.
+                                        if bodyLen > budgetLeft then
+                                            set omitField to (bodyLen as text)
+                                        else
+                                            set bodyField to candidateBody
+                                            set budgetLeft to budgetLeft - bodyLen
+                                        end if
                                     end if
                                     set output to output & ((item k of idList) as text) & fieldSep & ¬
                                         ((item k of nameList) as text) & fieldSep & folderName & fieldSep & ¬
                                         my isoDate(item k of createdList) & fieldSep & ¬
-                                        my isoDate(item k of modifiedList) & fieldSep & bodyField & recordSep
+                                        my isoDate(item k of modifiedList) & fieldSep & bodyField & fieldSep & ¬
+                                        omitField & recordSep
                                     set emitted to emitted + 1
                                 end repeat
                             end if
@@ -539,12 +603,27 @@ private enum Scripts {
         set noteID to item 1 of argv
         set folderHint to ""
         if (count of argv) > 1 then set folderHint to item 2 of argv
+        set wantBody to true
+        if (count of argv) > 2 then set wantBody to ((item 3 of argv) is "1")
+        set maxBody to 6000000
+        if (count of argv) > 3 then set maxBody to (item 4 of argv) as integer
+
+        set noteBody to ""
+        set notePlain to ""
+        set omitted to ""
+        set folderName to folderHint
+        set gotProperties to false
 
         tell application "Notes"
             set resolved to false
             try
+                -- The name is read here rather than in a separate probe: this
+                -- doubles as the check that the id resolved, and every property
+                -- read is a round trip to Notes. Nine of them is what made this
+                -- endpoint take 1.2s where the equivalent four-event script
+                -- took 0.33s.
                 set theNote to note id noteID
-                set probe to (name of theNote)
+                set noteName to ((name of theNote) as text)
                 set resolved to true
             end try
 
@@ -554,25 +633,69 @@ private enum Scripts {
                     error "REMOTE_SHORTCUTS_NOT_FOUND" number -1728
                 end if
                 set theNote to item 1 of matches
+                set noteName to ((name of theNote) as text)
             end if
 
-            set noteName to ((name of theNote) as text)
-            set noteBody to ((body of theNote) as text)
-            set notePlain to ((plaintext of theNote) as text)
-            set createdAt to (creation date of theNote)
-            set modifiedAt to (modification date of theNote)
+            -- One round trip for everything, when the body is wanted anyway.
+            --
+            -- `properties` hands back name, dates, body, plaintext and the
+            -- container together, replacing five separate reads. It is only
+            -- worth it when the body is being fetched regardless: asking for
+            -- properties always transfers the body, and a 17.8 MB note must not
+            -- pay that just to have its title read.
+            if wantBody then
+                try
+                    set props to (properties of theNote)
+                    set noteName to ((name of props) as text)
+                    set createdAt to (creation date of props)
+                    set modifiedAt to (modification date of props)
+                    set rawBody to ((body of props) as text)
+                    set rawPlain to ((plaintext of props) as text)
+                    if folderName is "" then
+                        try
+                            set theContainer to (container of props)
+                            set folderName to ((name of theContainer) as text)
+                        end try
+                    end if
+                    set gotProperties to true
+                on error propsError
+                    log "RS_PROPS_FALLBACK: " & propsError
+                end try
+            end if
+
+            if gotProperties is false then
+                set createdAt to (creation date of theNote)
+                set modifiedAt to (modification date of theNote)
+                if wantBody then
+                    set rawBody to ((body of theNote) as text)
+                    set rawPlain to ((plaintext of theNote) as text)
+                end if
+            end if
+
+            -- The body is measured before it is returned. A note of embedded
+            -- images measured 17.8 MB, which blew the 8 MB output cap and made
+            -- the note unreachable through this endpoint: no title, no folder,
+            -- no dates, because one field was too big. Metadata always comes
+            -- back now; only the body can be missing.
+            if wantBody then
+                set totalLen to (count of rawBody) + (count of rawPlain)
+                if totalLen > maxBody then
+                    set omitted to (totalLen as text)
+                else
+                    set noteBody to rawBody
+                    set notePlain to rawPlain
+                end if
+            end if
         end tell
 
-        if folderHint is not "" then
-            set folderName to folderHint
-        else
+        if folderName is "" then
             set folderName to my folderOf(theNote)
             if folderName is "" then set folderName to my folderContaining(noteID)
         end if
 
         return noteID & fieldSep & noteName & fieldSep & folderName & fieldSep & ¬
             my isoDate(createdAt) & fieldSep & my isoDate(modifiedAt) & fieldSep & ¬
-            noteBody & fieldSep & notePlain & recordSep
+            noteBody & fieldSep & notePlain & fieldSep & omitted & recordSep
     end run
 
     -- Reads the note's container directly. ~0.35s against ~1.9s for the scan.

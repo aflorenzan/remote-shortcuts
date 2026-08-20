@@ -18,7 +18,7 @@ public final class App: @unchecked Sendable {
         self.router = RouteBuilder(
             configuration: configuration,
             eventKit: EventKitService(),
-            notes: NotesService(),
+            notes: NotesService(bodyBudgetBytes: configuration.noteBodyBudgetBytes),
             shortcuts: ShortcutsService(
                 allowList: configuration.allowedShortcuts,
                 defaultTimeout: configuration.shortcutTimeoutSeconds
@@ -96,21 +96,12 @@ public final class App: @unchecked Sendable {
     }
 
     private func enforceSourceAddress(_ request: HTTPRequest) throws {
-        let address = request.remoteAddress
-
-        if configuration.loopbackOnly {
-            guard CIDR.isLoopback(address) else {
-                Log.warn("Rejected non-loopback request from \(address)")
-                throw APIError.forbidden("This server only accepts connections from localhost.")
-            }
+        switch OriginPolicy.decide(address: request.remoteAddress, configuration: configuration) {
+        case .allowed:
             return
-        }
-
-        guard !configuration.allowedOrigins.isEmpty else { return }
-        if CIDR.isLoopback(address) { return }
-        guard configuration.allowedOrigins.contains(where: { $0.contains(address) }) else {
-            Log.warn("Rejected request from \(address): not in allowed_origins")
-            throw APIError.forbidden("Source address \(address) is not in 'allowed_origins'.")
+        case let .refused(reason, message):
+            Log.warn("\(reason) from \(request.remoteAddress)")
+            throw APIError.forbidden(message)
         }
     }
 

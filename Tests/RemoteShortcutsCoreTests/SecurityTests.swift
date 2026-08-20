@@ -172,3 +172,59 @@ final class HeaderSanitisationTests: XCTestCase {
         XCTAssertEqual(App.hostname(from: "example.com"), "example.com")
     }
 }
+
+/// The rule that decides who may talk to the server.
+///
+/// These exist because the obvious reading of `allowed_origins` — "only these
+/// addresses, no exceptions" — locked a Mac out of its own service. Since
+/// `preflight` grants permissions by asking the service to prompt, that meant
+/// an install with a perfectly ordinary config could never grant anything.
+final class OriginPolicyTests: XCTestCase {
+    private func configuration(host: String, origins: [String], loopbackOnly: Bool? = nil) -> Configuration {
+        Configuration(
+            host: host,
+            port: 8787,
+            token: String(repeating: "a", count: 32),
+            loopbackOnly: loopbackOnly,
+            allowedOrigins: origins.compactMap(CIDR.init)
+        )
+    }
+
+    func testAllowsAnAddressOnTheList() {
+        let config = configuration(host: "192.168.1.129", origins: ["192.168.50.204/32"])
+        XCTAssertEqual(OriginPolicy.decide(address: "192.168.50.204", configuration: config), .allowed)
+    }
+
+    func testRefusesAnAddressOffTheList() {
+        let config = configuration(host: "192.168.1.129", origins: ["192.168.50.204/32"])
+        guard case .refused = OriginPolicy.decide(address: "192.168.50.205", configuration: config) else {
+            return XCTFail("an address outside allowed_origins must be refused")
+        }
+    }
+
+    func testAllowsLoopbackWhateverTheList() {
+        let config = configuration(host: "192.168.1.129", origins: ["192.168.50.204/32"])
+        XCTAssertEqual(OriginPolicy.decide(address: "127.0.0.1", configuration: config), .allowed)
+    }
+
+    /// The regression. A local call to the server's own LAN address carries
+    /// that address as its source, and used to be refused — so `doctor` and
+    /// `preflight` reported the service as unreachable while it was running.
+    func testAllowsTheHostItBoundTo() {
+        let config = configuration(host: "192.168.1.129", origins: ["192.168.50.204/32"])
+        XCTAssertEqual(OriginPolicy.decide(address: "192.168.1.129", configuration: config), .allowed)
+    }
+
+    func testEmptyListAllowsEveryone() {
+        let config = configuration(host: "192.168.1.129", origins: [])
+        XCTAssertEqual(OriginPolicy.decide(address: "10.0.0.1", configuration: config), .allowed)
+    }
+
+    /// loopback_only is a stricter promise and outranks the exemption above.
+    func testLoopbackOnlyStillRefusesTheBindAddress() {
+        let config = configuration(host: "127.0.0.1", origins: [], loopbackOnly: true)
+        guard case .refused = OriginPolicy.decide(address: "192.168.1.129", configuration: config) else {
+            return XCTFail("loopback_only must refuse a non-loopback address")
+        }
+    }
+}
