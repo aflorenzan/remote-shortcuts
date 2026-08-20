@@ -17,6 +17,10 @@ struct ServiceClient {
 
     enum ClientError: Error, CustomStringConvertible {
         case unreachable(String)
+        /// The server accepted the connection and did not finish answering.
+        /// It is running — a stopped one refuses the connection instead — so
+        /// the remedy is never "start the service".
+        case timedOut(String)
         /// The server answered and declined this address. A *running* service,
         /// which is the opposite of what the caller concludes from a bare
         /// failure — and concluding wrongly is what left an install with no way
@@ -27,6 +31,7 @@ struct ServiceClient {
         var description: String {
             switch self {
             case let .unreachable(detail): return detail
+            case let .timedOut(detail): return detail
             case let .refusedOrigin(detail): return detail
             case let .http(status, body): return "HTTP \(status): \(body)"
             }
@@ -36,7 +41,7 @@ struct ServiceClient {
         var serviceIsRunning: Bool {
             switch self {
             case .unreachable: return false
-            case .refusedOrigin, .http: return true
+            case .timedOut, .refusedOrigin, .http: return true
             }
         }
     }
@@ -56,7 +61,17 @@ struct ServiceClient {
         try send(method: "GET", path: path, timeout: timeout)
     }
 
-    func post(_ path: String, timeout: TimeInterval = 180) throws -> [String: Any] {
+    /// Long enough to outlast the service's own worst case.
+    ///
+    /// `requestAllAccess` raises one prompt per entity, waiting up to 120s for
+    /// each, so it can legitimately take 240s before answering. The client used
+    /// to wait 180 — less than that — and so gave up on an install that was
+    /// working, printing "could not reach the service" while the prompts were
+    /// still on the screen waiting to be accepted. The client must never be the
+    /// first to lose patience.
+    static let permissionRequestTimeout: TimeInterval = 300
+
+    func post(_ path: String, timeout: TimeInterval = ServiceClient.permissionRequestTimeout) throws -> [String: Any] {
         try send(method: "POST", path: path, timeout: timeout)
     }
 
@@ -102,9 +117,12 @@ struct ServiceClient {
 
         guard semaphore.wait(timeout: .now() + timeout + 5) == .success else {
             task.cancel()
-            throw ClientError.unreachable("no reply within \(Int(timeout))s")
+            throw ClientError.timedOut("no reply within \(Int(timeout))s")
         }
         if let transportError {
+            if (transportError as? URLError)?.code == .timedOut {
+                throw ClientError.timedOut(transportError.localizedDescription)
+            }
             throw ClientError.unreachable(transportError.localizedDescription)
         }
 

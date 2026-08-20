@@ -407,16 +407,27 @@ If the body is over the byte budget, `body` and `plain_text` are replaced by
 unreachable because it is large.
 
 > [!NOTE]
-> **`include_body=false` is for reach, not for speed.** It exists so a note too
-> large to return is still readable, and it is not reliably faster: the full
-> read gets everything in one `properties` round trip, while the metadata-only
-> read asks for each field separately. Both land around **0.7–1.0 s**.
+> **`include_body=false` pays off on large notes and costs a little on small
+> ones.** Measured on a 42-folder library:
 >
-> The floor is AppleScript itself. Fetching exactly what this endpoint returns —
-> name, container, body, plaintext and both dates — measures **~0.56 s** from
-> `osascript` alone on a 42-folder library, before this server does anything.
-> Getting materially below that would mean keeping an interpreter alive between
-> requests, which is an architecture change, not a tuning one.
+> | Note | With body | `include_body=false` |
+> | --- | --- | --- |
+> | Two lines | ~1.05 s | ~1.24 s |
+> | 17.8 MB of images | ~10.3 s | ~1.27 s |
+>
+> The inversion on small notes is not a bug, and not a second `osascript` —
+> there is exactly one per request either way. It is Apple Events: reading
+> `properties` fetches name, dates, body, plaintext *and* the container in a
+> single round trip, and the metadata-only path cannot use it, because asking
+> for properties transfers the body — which is the entire thing it is avoiding.
+> So it reads five fields separately and pays two extra round trips, about
+> 0.2 s. Use it when a note is large or might be; not as a general speed-up.
+>
+> The floor is AppleScript itself: fetching exactly these fields measures
+> **0.51–0.56 s** from `osascript` alone, before this server does anything.
+> Going materially below that means keeping an interpreter alive between
+> requests, which is an architecture change rather than a tuning one, and is not
+> planned.
 
 ### `POST /v1/notes`
 

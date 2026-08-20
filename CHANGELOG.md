@@ -16,6 +16,32 @@ which is exactly why none of it was caught earlier.
 
 ### Fixed — later rounds of runtime verification
 
+- **The install's permission step gave up while the prompts were still on
+  screen.** `requestAllAccess` raises one prompt per entity and waits up to 120s
+  for each, so it can legitimately take 240s to answer. The client waited 180.
+  When a rebuild had invalidated the TCC grants — which happens intermittently
+  with an ad-hoc signature — the install printed "could not reach the service"
+  and told the user to start a service that had answered a health check two
+  lines earlier. Running `preflight` by hand straight afterwards worked, taking
+  52s.
+
+  The client now waits longer than the service's worst case, and a timeout is
+  no longer reported as unreachability: the connection was accepted, so the
+  service is running by definition. On a timeout, `preflight` and `install.sh`
+  ask the service what it actually ended up holding rather than trusting the
+  verdict of the call that stopped waiting — a prompt accepted a second later
+  still granted the permission.
+
+- **`include_body=false` on a small note stays slightly slower, and now says
+  why.** It is not a second `osascript` — there is one per request either way —
+  but two extra Apple Events: reading `properties` fetches name, dates, body,
+  plaintext and the container in a single round trip, and the metadata-only
+  path cannot use it, because asking for properties transfers the body it
+  exists to avoid. Measured: ~1.24s against ~1.05s on a two-line note, and
+  ~1.27s against ~10.3s on the 17.8 MB one. Documented as what it is — a switch
+  for large notes, not a general speed-up. H17 is closed at the measured floor
+  of 0.51–0.56s of AppleScript.
+
 - **`PATCH …?span=future_events` was accepted, ignored, and answered `200`.**
   `span` is read from the body on `PATCH`; the query string was on the allowed
   list and nothing read it. So the request ran as `this_event` and changed

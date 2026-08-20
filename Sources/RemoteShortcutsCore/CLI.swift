@@ -242,15 +242,38 @@ public enum CLI {
                 if state != "granted" { problems += 1 }
             }
             if let note = body["note"] as? String { print("    \(note)") }
-        } catch let error as ServiceClient.ClientError where error.serviceIsRunning {
-            print("the service refused this request")
-            print("    \(error)")
-            print("")
-            print("    The service is running — this is not a start-it problem. Add this")
-            print("    Mac's address to 'allowed_origins' in \(ConfigPaths.configFile.path),")
-            print("    or remove the list to accept any address the token authenticates,")
-            print("    then restart the service and run preflight again.")
-            problems += 1
+        } catch let error as ServiceClient.ClientError {
+            switch error {
+            case .timedOut:
+                // The service is running — it accepted the connection. What ran
+                // out is this side's patience, and the prompts are very likely
+                // still on screen. Saying "start the service" here sent people
+                // after a process that was working.
+                print("still waiting when this command gave up")
+                print("    \(error)")
+                print("")
+                print("    The service is running and the prompts may still be on the Mac's")
+                print("    screen. Accept them, then check what actually landed:")
+                print("")
+                problems += CLI.reportServicePermissions(using: client)
+            case .refusedOrigin, .http:
+                print("the service refused this request")
+                print("    \(error)")
+                print("")
+                print("    The service is running — this is not a start-it problem. Add this")
+                print("    Mac's address to 'allowed_origins' in \(ConfigPaths.configFile.path),")
+                print("    or remove the list to accept any address the token authenticates,")
+                print("    then restart the service and run preflight again.")
+                problems += 1
+            case .unreachable:
+                print("could not reach the service")
+                print("    \(error)")
+                print("")
+                print("    The service has to be running to be granted anything. Start it:")
+                print("      launchctl kickstart -k gui/$(id -u)/com.remoteshortcuts.server")
+                print("    then run preflight again.")
+                problems += 1
+            }
         } catch {
             print("could not reach the service")
             print("    \(error)")
@@ -297,6 +320,34 @@ public enum CLI {
         Then: remote-shortcuts doctor
         """)
         return 1
+    }
+
+    /// Asks the service what it holds and prints it. Returns how many of the
+    /// two are missing.
+    ///
+    /// Used when a permission request times out: the answer that matters is
+    /// what the service ended up with, not what the call that gave up returned.
+    /// A prompt accepted a second after the client stopped listening still
+    /// granted the permission.
+    static func reportServicePermissions(using client: ServiceClient) -> Int {
+        guard let body = try? client.get("/v1/system/permissions"),
+              let permissions = body["permissions"] as? [String: Any]
+        else {
+            print("      (could not read the current state; run: remote-shortcuts doctor)")
+            return 1
+        }
+
+        var missing = 0
+        for label in ["calendars", "reminders"] {
+            let state = permissions[label] as? String ?? "unknown"
+            print("      \(label.capitalized): \(state)")
+            if state != "granted" { missing += 1 }
+        }
+        if missing > 0 {
+            print("")
+            print("      Run 'remote-shortcuts preflight' again once you have accepted them.")
+        }
+        return missing
     }
 
     // MARK: - doctor
