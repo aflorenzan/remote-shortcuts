@@ -16,6 +16,32 @@ which is exactly why none of it was caught earlier.
 
 ### Fixed — later rounds of runtime verification
 
+- **The install's permission step gave up while the prompts were still on
+  screen.** `requestAllAccess` raises one prompt per entity and waits up to 120s
+  for each, so it can legitimately take 240s to answer. The client waited 180.
+  When a rebuild had invalidated the TCC grants — which happens intermittently
+  with an ad-hoc signature — the install printed "could not reach the service"
+  and told the user to start a service that had answered a health check two
+  lines earlier. Running `preflight` by hand straight afterwards worked, taking
+  52s.
+
+  The client now waits longer than the service's worst case, and a timeout is
+  no longer reported as unreachability: the connection was accepted, so the
+  service is running by definition. On a timeout, `preflight` and `install.sh`
+  ask the service what it actually ended up holding rather than trusting the
+  verdict of the call that stopped waiting — a prompt accepted a second later
+  still granted the permission.
+
+- **`include_body=false` on a small note stays slightly slower, and now says
+  why.** It is not a second `osascript` — there is one per request either way —
+  but two extra Apple Events: reading `properties` fetches name, dates, body,
+  plaintext and the container in a single round trip, and the metadata-only
+  path cannot use it, because asking for properties transfers the body it
+  exists to avoid. Measured: ~1.24s against ~1.05s on a two-line note, and
+  ~1.27s against ~10.3s on the 17.8 MB one. Documented as what it is — a switch
+  for large notes, not a general speed-up. H17 is closed at the measured floor
+  of 0.51–0.56s of AppleScript.
+
 - **`PATCH …?span=future_events` was accepted, ignored, and answered `200`.**
   `span` is read from the body on `PATCH`; the query string was on the allowed
   list and nothing read it. So the request ran as `this_event` and changed
@@ -180,21 +206,20 @@ which is exactly why none of it was caught earlier.
   choice and `?include_body=true` on its own should not fail. The response
   reports `limit_applied` when it clamps.
 
-- **`span=future_events` returned 200 for an edit it did not make.** On a weekly
-  series of four, editing the third occurrence changed only that one: EventKit
-  detached it instead of splitting the series, leaving later occurrences
-  untouched. The same happened with a bare id, so it was not the id parsing.
+- **Span operations resolve the occurrence through a date predicate**, the route
+  EventKit's span semantics are defined against, rather than through an
+  identifier lookup. The outcome is then verified: if a `future_events` edit
+  ends up affecting only its own occurrence, or a `future_events` delete leaves
+  later occurrences behind, the call returns `502` saying so instead of a
+  misleading `200`.
 
-  Span operations now resolve the occurrence through a date predicate — the
-  route EventKit's span semantics are defined against — rather than through an
-  identifier lookup. **And the outcome is verified**: if the occurrence ends up
-  detached rather than the series split, or if a `future_events` delete leaves
-  later occurrences behind, the call returns `502` saying exactly that instead
-  of a misleading `200`. The change to the single occurrence is kept, not rolled
-  back, and the error says so.
-
-  `docs/API.md` now carries the caveat and tells callers to edit occurrences
-  individually meanwhile.
+  > **Superseded.** This entry originally reported that `future_events` changed
+  > only the occurrence it named. It does not, and never did — see the retracted
+  > entry above. Whether this report shared the query-string mistake that
+  > invalidated the later ones was never established, but no detachment has been
+  > observed since, on any invocation known to have been well formed. The
+  > predicate resolution and the check are kept as safeguards; the claim that
+  > they were fixing an observed failure is withdrawn.
 
 - **A reply over 8 MB deadlocked the subprocess instead of erroring.** The pipe
   reader stopped draining once the output cap was hit, which left `osascript`
