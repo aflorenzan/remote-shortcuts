@@ -1,0 +1,83 @@
+name: Remove pre-releases
+
+# Deletes the release-candidate releases for a version once its stable release
+# exists, so the releases page shows the one build people should install.
+#
+# Deliberately different from retract-release.yml, which strips a release's
+# assets and keeps the page as a record of something that went wrong. Nothing
+# went wrong here: an rc is scaffolding, and once the stable release is up the
+# scaffolding is noise. The tags are kept, so every rc commit stays reachable
+# and the build provenance attestations still resolve.
+#
+# Refuses to run unless the stable release exists, because deleting the only
+# downloads a project has is not a thing to do by accident.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version whose candidates to remove, without the v (e.g. 1.1.0)"
+        required: true
+      delete_tags:
+        description: "Also delete the rc tags"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  remove:
+    name: Remove v${{ inputs.version }} candidates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Delete the release-candidate releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DELETE_TAGS: ${{ inputs.delete_tags }}
+        run: |
+          set -euo pipefail
+
+          STABLE="v${VERSION#v}"
+
+          if ! gh release view "${STABLE}" >/dev/null 2>&1; then
+            echo "::error::${STABLE} has not been released. Refusing to remove its candidates."
+            exit 1
+          fi
+          if gh release view "${STABLE}" --json isPrerelease --jq '.isPrerelease' | grep -q true; then
+            echo "::error::${STABLE} is still marked as a pre-release. Refusing."
+            exit 1
+          fi
+          echo "${STABLE} is published and stable. Removing its candidates."
+
+          MATCHED=0
+          while read -r tag; do
+            [[ -z "${tag}" ]] && continue
+            case "${tag}" in
+              "${STABLE}-rc."*) ;;
+              *) continue ;;
+            esac
+
+            MATCHED=$((MATCHED + 1))
+            echo "Deleting release ${tag}"
+            if [[ "${DELETE_TAGS}" == "true" ]]; then
+              gh release delete "${tag}" --yes --cleanup-tag
+            else
+              gh release delete "${tag}" --yes
+            fi
+          done < <(gh release list --limit 200 --json tagName --jq '.[].tagName')
+
+          if (( MATCHED == 0 )); then
+            echo "No candidates found for ${STABLE}; nothing to do."
+          else
+            echo "Removed ${MATCHED} candidate release(s)."
+          fi
+
+          echo
+          echo "Releases now:"
+          gh release list --limit 20

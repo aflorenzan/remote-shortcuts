@@ -8,11 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.1.0] — 2026-08-20
 
-1.1.0 has not shipped as a stable release yet, so this section is where its
-fixes accumulate until it does, and each release candidate ships the whole of
-it. Fixes from runtime verification against real data on macOS: every item was
-observed, not inferred — the code compiled and passed its unit tests throughout,
-which is exactly why none of it was caught earlier.
+The first release that runs. v1.0.0 could not start at all, and everything below
+was found by running this code against real calendars, notes and reminders on a
+Mac — twenty-two findings, not one of which the compiler or the unit tests could
+have caught. Several are corrections to earlier corrections; those are marked.
+
+**Verified by hand on macOS 15:** Notes listing and retrieval including a 17.8 MB
+note, calendar events with recurring series and `span` semantics, reminders,
+permission grants to the service, and the `allowed_origins` filter.
+
+**Not verified on hardware at the time of release:** installing with the Mac's
+own address outside `allowed_origins`, and the full matrix of `future_events`
+edits including the last-occurrence case. Both are covered by tests and by the
+reasoning in the entries below, neither by a real run. They are called out here
+rather than left for someone to discover.
 
 ### Fixed — later rounds of runtime verification
 
@@ -253,6 +262,11 @@ which is exactly why none of it was caught earlier.
   shortcut over 30s. The timer is now disarmed while work is in flight.
 
 ### Added
+
+- **[docs/GUIDE.md](docs/GUIDE.md)**, a guide for people rather than a reference
+  for clients: what the thing does, getting it running, wiring it into n8n, and
+  the behaviours that surprise people — the latency floor, permissions lost to a
+  rebuild, deleted notes that keep answering, and where `span` goes.
 
 - **`GET /v1/diagnostics/event-resolution/:id`**, read-only, reporting what
   `event(withIdentifier:)` returns for an id and which branch of the resolver a

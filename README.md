@@ -45,6 +45,7 @@ curl -X POST http://127.0.0.1:8787/v1/reminders \
 
 ## Contents
 
+- [Guide](#guide)
 - [Why it looks like this](#why-it-looks-like-this)
 - [Requirements](#requirements)
 - [Install](#install)
@@ -57,6 +58,13 @@ curl -X POST http://127.0.0.1:8787/v1/reminders \
 - [Contributing](#contributing)
 - [Security](#security)
 - [Licence](#licence)
+
+## Guide
+
+**New here? Start with [docs/GUIDE.md](docs/GUIDE.md)** — what it does, getting
+it running, wiring it into n8n, and the handful of behaviours that will surprise
+you. This README covers installation and configuration; the guide covers using
+the thing.
 
 ## Why it looks like this
 
@@ -185,8 +193,8 @@ To reach it from an n8n instance that is not on this Mac, pick one:
 
 ## API
 
-Full reference: **[docs/API.md](docs/API.md)**. n8n recipes:
-**[docs/n8n.md](docs/n8n.md)**.
+How to use it: **[docs/GUIDE.md](docs/GUIDE.md)**. Full endpoint reference:
+**[docs/API.md](docs/API.md)**. n8n recipes: **[docs/n8n.md](docs/n8n.md)**.
 
 ```
 GET    /v1                          What this server exposes
