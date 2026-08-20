@@ -46,7 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   returns its whole result at the end, so nothing exceeds the cap until all the
   work is done, and killing the child saves nothing. `include_body` is now
   capped at 15 notes (`max_notes_with_body`, configurable) and checked before
-  any work starts, so it fails in milliseconds.
+  any work starts, so it fails in milliseconds. An explicit over-cap `limit` is
+  refused; an omitted one is clamped, since the default of 50 is the server's
+  choice and `?include_body=true` on its own should not fail. The response
+  reports `limit_applied` when it clamps.
 
 - **`span=future_events` returned 200 for an edit it did not make.** On a weekly
   series of four, editing the third occurrence changed only that one: EventKit

@@ -350,6 +350,10 @@ public enum CLI {
                 let body = try client.get("/v1/system/permissions")
                 let permissions = body["permissions"] as? [String: Any] ?? [:]
 
+                // Counted separately from `problems`: this remedy is about
+                // permissions, and printing it because the config file happened
+                // to be unreadable would send the reader somewhere useless.
+                var missing = 0
                 for label in ["calendars", "reminders"] {
                     let state = permissions[label] as? String ?? "unknown"
                     let name = label.capitalized
@@ -358,27 +362,28 @@ public enum CLI {
                         print("  \(name): granted ✓")
                     case "write_only":
                         print("  \(name): write-only ✗ — can create but not read")
-                        problems += 1
+                        missing += 1
                     case "not_determined":
                         print("  \(name): never granted ✗ — the service has no access")
-                        problems += 1
+                        missing += 1
                     default:
                         print("  \(name): \(state) ✗")
-                        problems += 1
+                        missing += 1
                     }
                 }
                 if let note = permissions["note"] as? String {
                     print("  note: \(note)")
                 }
-                if problems > 0 {
+                problems += missing
+                if missing > 0 {
                     print("")
-                    print("  To grant them TO THE SERVICE, with somebody at the screen to accept:")
-                    print("    curl -X POST -H \"Authorization: Bearer $(remote-shortcuts token show)\" \\")
-                    print("      $(remote-shortcuts endpoint)/v1/system/permissions/request")
+                    print("  To grant them, with somebody at the screen to accept the prompts:")
+                    print("    remote-shortcuts preflight")
                     print("  Or: System Settings → Privacy & Security → Calendars / Reminders")
                     print("")
-                    print("  Note that 'remote-shortcuts preflight' from a terminal will NOT do it:")
-                    print("  macOS attributes the grant to your terminal app, not to the service.")
+                    print("  `preflight` works by asking the *service* to raise the prompts.")
+                    print("  A prompt raised any other way from a terminal is granted to the")
+                    print("  terminal app, which leaves the service with nothing.")
                 }
             } catch {
                 print("  could not ask the service: \(error)")

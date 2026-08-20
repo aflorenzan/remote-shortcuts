@@ -83,14 +83,13 @@ public enum APIError: Error, CustomStringConvertible {
     public var hint: String? {
         switch self {
         case let .permissionDenied(service, _):
-            // Deliberately does NOT say "run preflight from a terminal".
+            // Every route named here grants the *service*.
             //
-            // macOS attributes a privacy grant to the *responsible process* —
-            // for a CLI run from a terminal, that is the terminal app, not this
-            // bundle. So `preflight` in a terminal grants Terminal.app (or
-            // whatever launched it) and does nothing for the LaunchAgent. The
-            // two routes below are the ones that actually reach the service.
-            return "Grant it to the service, not to your terminal: either POST /v1/system/permissions/request while watching for the prompt, or open System Settings → Privacy & Security → \(service) and enable 'Remote Shortcuts'. Then: remote-shortcuts doctor"
+            // macOS attributes a privacy grant to the responsible process, so a
+            // prompt raised directly by a CLI in a terminal grants the terminal
+            // app and does nothing for the LaunchAgent. `preflight` is listed
+            // because it no longer prompts itself — it asks the service to.
+            return "Grant it to the service, not to your terminal: POST /v1/system/permissions/request while watching for the prompt (this is what 'remote-shortcuts preflight' does), or open System Settings → Privacy & Security → \(service) and enable 'Remote Shortcuts'. Then: remote-shortcuts doctor"
         default:
             return nil
         }

@@ -427,20 +427,31 @@ public struct RouteBuilder {
 
         router.get("/v1/notes") { request in
             let includeBody = try request.queryBool("include_body") ?? false
-            let limit = min(try request.queryInt("limit") ?? 50, 500)
+            let requestedLimit = try request.queryInt("limit")
+            var limit = min(requestedLimit ?? 50, 500)
+            var clamped = false
 
-            // Refuse up front rather than after the work.
+            // Bound the work before doing it, not after.
             //
             // The 8 MB output cap cannot be enforced early: `osascript` returns
             // its whole result at the end, so nothing is over the limit until
             // everything has already been computed. A 50-note body request
-            // measured 17 seconds before its 413. This check makes it
-            // immediate, at the cost of being conservative — raise
-            // `max_notes_with_body` if your notes are short.
+            // measured 17 seconds before its 413.
+            //
+            // An explicit over-cap `limit` is refused, because the caller asked
+            // for something this server will not do. An unspecified one is
+            // clamped instead — the default of 50 is ours, not theirs, and
+            // failing the simplest possible call (`?include_body=true`) would
+            // be a poor way to communicate a policy. The response says when it
+            // clamped, so a short list is never mistaken for a short library.
             if includeBody, limit > configuration.maxNotesWithBody {
-                throw APIError.payloadTooLarge(
-                    "Asking for \(limit) note bodies at once will exceed the 8 MB this server buffers, and the failure would take many seconds to discover, so it is refused now. Use 'limit' of \(configuration.maxNotesWithBody) or fewer with 'include_body', drop 'include_body' to list more, or raise 'max_notes_with_body' in \(ConfigPaths.configFile.path) if your notes are short."
-                )
+                guard requestedLimit == nil else {
+                    throw APIError.payloadTooLarge(
+                        "Asking for \(limit) note bodies at once will exceed the 8 MB this server buffers, and the failure would take many seconds to discover, so it is refused now. Use 'limit' of \(configuration.maxNotesWithBody) or fewer with 'include_body', drop 'include_body' to list more, or raise 'max_notes_with_body' in \(ConfigPaths.configFile.path) if your notes are short."
+                    )
+                }
+                limit = configuration.maxNotesWithBody
+                clamped = true
             }
 
             let items = try notes.listNotes(
@@ -449,7 +460,12 @@ public struct RouteBuilder {
                 limit: limit,
                 includeBody: includeBody
             )
-            return .json(["notes": items, "count": items.count])
+            var payload: [String: Any] = ["notes": items, "count": items.count]
+            if clamped {
+                payload["limit_applied"] = limit
+                payload["note"] = "Limited to \(limit) notes because 'include_body' was set; there may be more. Ask for them in pages, or raise 'max_notes_with_body' in the config."
+            }
+            return .json(payload)
         }
 
         router.get("/v1/notes/:id") { request in

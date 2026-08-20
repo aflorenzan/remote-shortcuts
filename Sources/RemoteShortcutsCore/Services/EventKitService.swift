@@ -25,6 +25,14 @@ public final class EventKitService: @unchecked Sendable {
     private var promptOutcomes: [UInt: PromptResult] = [:]
     private let promptLock = NSLock()
 
+    /// Serialises the prompt itself, which `promptLock` cannot: that one guards
+    /// the dictionary and is released long before the user answers. Without
+    /// this, ten concurrent requests arriving at an undetermined permission
+    /// each raise their own prompt and each wait out the timeout — exactly the
+    /// pile-up the once-per-process rule exists to prevent. Held across the
+    /// wait, so latecomers block briefly and then read the answer.
+    private let promptGate = NSLock()
+
     public enum PromptResult {
         case granted
         case denied
@@ -125,6 +133,16 @@ public final class EventKitService: @unchecked Sendable {
         return promptOutcomes[UInt(entity.rawValue)]
     }
 
+    /// Prompts once per process, however many callers ask at once.
+    private func promptOnce(for entity: EKEntityType, timeout: TimeInterval) -> PromptResult {
+        if let prior = priorPrompt(for: entity) { return prior }
+        promptGate.lock()
+        defer { promptGate.unlock() }
+        // Somebody may have prompted while this thread waited for the gate.
+        if let prior = priorPrompt(for: entity) { return prior }
+        return requestAccess(to: entity, timeout: timeout)
+    }
+
     /// The status TCC reports, corrected by what the process can actually do.
     ///
     /// `authorizationStatus(for:)` keeps saying `notDetermined` after the user
@@ -158,6 +176,13 @@ public final class EventKitService: @unchecked Sendable {
     /// Generous timeout — unlike a request-path prompt, the caller here is a
     /// person deliberately waiting to click Allow.
     public func requestAllAccess(timeout: TimeInterval = 120) -> [String: Any] {
+        // Deliberately *not* `promptOnce`: this endpoint exists to be called
+        // when somebody is finally at the screen, so a cached `unanswered` from
+        // a request that nobody saw must not suppress the prompt. It still
+        // takes the gate, so it cannot race a request-path prompt.
+        promptGate.lock()
+        defer { promptGate.unlock() }
+
         var report: [String: Any] = [:]
         for (label, entity) in [("calendars", EKEntityType.event), ("reminders", .reminder)] {
             let current = effectiveAccess(for: entity)
@@ -205,7 +230,7 @@ public final class EventKitService: @unchecked Sendable {
             // presenting to n8n as a hang. Under launchd there is usually
             // nobody watching to accept it, so the second request should fail
             // in milliseconds with the same explanation.
-            let outcome = priorPrompt(for: entity) ?? requestAccess(to: entity, timeout: promptTimeout)
+            let outcome = promptOnce(for: entity, timeout: promptTimeout)
             switch outcome {
             case .granted:
                 return

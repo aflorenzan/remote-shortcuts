@@ -332,10 +332,15 @@ dictionary. Two consequences worth knowing:
 > Note bodies are HTML and routinely run to hundreds of kilobytes each, so a few
 > dozen exceed the 8 MB the server buffers.
 >
-> The cap is checked **before** any work starts, and asking for more returns
-> `413` in milliseconds. It has to be: `osascript` returns its whole result at
-> the end, so an over-limit request is not detectable until everything has
-> already been computed — a 50-note request measured 17 seconds before failing.
+> The cap is checked **before** any work starts. It has to be: `osascript`
+> returns its whole result at the end, so an over-limit request is not
+> detectable until everything has already been computed — a 50-note request
+> measured 17 seconds before failing.
+>
+> Asking for more **explicitly** returns `413` in milliseconds. Omitting `limit`
+> entirely clamps to the cap instead of failing, and the response then carries
+> `limit_applied` and a `note` so a short list is not mistaken for a short
+> library. Page through with `limit` to read more.
 >
 > Raise `max_notes_with_body` in the config if your notes are short. Listing
 > without `include_body` is unaffected and goes up to 500.

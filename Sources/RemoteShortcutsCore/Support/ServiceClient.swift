@@ -46,8 +46,25 @@ struct ServiceClient {
         try send(method: "POST", path: path, timeout: timeout)
     }
 
+    /// Joins base and path by hand.
+    ///
+    /// Not `appendingPathComponent`: that API inserts its own separator, so a
+    /// path already starting with "/" can come out as "//v1/...". The router
+    /// treats an empty leading segment as real — it has to, for note ids that
+    /// contain "//" — so such a request would 404 for a reason nobody would
+    /// enjoy tracking down.
+    static func url(base: URL, path: String) -> URL? {
+        var base = base.absoluteString
+        while base.hasSuffix("/") { base.removeLast() }
+        let suffix = path.hasPrefix("/") ? path : "/" + path
+        return URL(string: base + suffix)
+    }
+
     private func send(method: String, path: String, timeout: TimeInterval) throws -> [String: Any] {
-        var request = URLRequest(url: endpoint.appendingPathComponent(path))
+        guard let url = ServiceClient.url(base: endpoint, path: path) else {
+            throw ClientError.unreachable("could not build a URL for \(path)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = timeout
