@@ -288,7 +288,7 @@ public struct RouteBuilder {
 
         router.get("/v1/calendars/events/:id") { request in
             try request.rejectUnknownQuery(allowed: [])
-            .json(["event": try eventKit.event(withIdentifier: try request.parameter("id"))])
+            return .json(["event": try eventKit.event(withIdentifier: try request.parameter("id"))])
         }
 
         router.post("/v1/calendars/events") { request in
