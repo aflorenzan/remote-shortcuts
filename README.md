@@ -196,6 +196,12 @@ To reach it from an n8n instance that is not on this Mac, pick one:
 How to use it: **[docs/GUIDE.md](docs/GUIDE.md)**. Full endpoint reference:
 **[docs/API.md](docs/API.md)**. n8n recipes: **[docs/n8n.md](docs/n8n.md)**.
 
+Driving this from Claude? The repository ships a skill at
+[`.claude/skills/remote-shortcuts`](.claude/skills/remote-shortcuts/SKILL.md),
+picked up automatically by any Claude Code session opened here. It carries the
+API surface plus the behaviours that mislead — where `span` goes, composite
+occurrence ids, note ids needing percent-encoding, and the permission model.
+
 ```
 GET    /v1                          What this server exposes
 GET    /v1/health                   Liveness (no auth)
