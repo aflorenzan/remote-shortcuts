@@ -87,23 +87,13 @@ which is exactly why none of it was caught earlier.
   claimed permissions "had to be granted again" — on the Mac they survived the
   rebuild. It no longer asserts either way and points at `doctor`.
 
-- **`PATCH ?span=future_events` still returned 200 for an edit it did not
-  make.** The guard added for this could never fire: it asked `EKEvent.isDetached`
-  after saving, and that property is not refreshed on the in-memory object. On
-  the same object, in the same instant, `hasRecurrenceRules` *is* refreshed —
-  the response even carried `is_recurring: false` while the check read `false`
-  from `isDetached` and passed.
-
-  The check now uses two signals read after the save: recurrence rules on the
-  saved event, and whether a later occurrence still carries the pre-edit title,
-  read back out of the store. The decision is a plain function with tests, so a
-  guard that cannot fire fails the build rather than the user. `DELETE` with
-  `future_events` was and remains correct — it verified against the store all
-  along, which is the difference.
-
-  `docs/API.md` also claimed a bare id with `future_events` "rewrites the series
-  from its beginning". It does not; it detaches its own occurrence like any
-  other id. The documentation now says what was measured.
+- ~~**`PATCH ?span=future_events` still returned 200 for an edit it did not
+  make.**~~ **Retracted.** This entry, published in `v1.1.0-rc.6`, was wrong.
+  `future_events` was never broken: the requests behind the report sent `span`
+  in the query string, which `PATCH` does not read, so they ran as `this_event`
+  and correctly changed one occurrence. The safety net was rewritten, and the
+  documentation altered, to chase a bug that did not exist. See the entry above
+  on the ignored `span` query for what was actually wrong and what was undone.
 
 - **A single large note made itself unfetchable and poisoned every listing it
   appeared in.** One note of embedded images measured 17.8 MB — 107 characters
