@@ -16,6 +16,57 @@ which is exactly why none of it was caught earlier.
 
 ### Fixed — later rounds of runtime verification
 
+- **`PATCH …?span=future_events` was accepted, ignored, and answered `200`.**
+  `span` is read from the body on `PATCH`; the query string was on the allowed
+  list and nothing read it. So the request ran as `this_event` and changed
+  exactly one occurrence of the series — which is what `future_events` failing
+  would also look like.
+
+  It was taken for exactly that. Two rounds of verification chased it, a
+  working safety net was rewritten to catch it, and three false statements went
+  into `docs/API.md`. `PATCH` now refuses a `span` query with a `400` saying
+  where it goes; `DELETE`, which has no body, still takes it in the query.
+
+  The lesson is the one H18 was about: a parameter accepted and not read is
+  worse than one rejected, because the answer still looks like an answer. The
+  allow-list is what let this single parameter through.
+
+- **`docs/API.md` described `future_events` as broken. It is not.** Re-measured
+  with `span` in the body, on a weekly series of four: editing the third
+  occurrence with a composite id changes the third and fourth, leaves the first
+  two alone, keeps everything recurring and shifts no dates. A bare id rewrites
+  the series from its beginning — which is what this document said originally,
+  before it was "corrected" on the strength of the invalid tests. The warning
+  block is gone and the table says what was measured.
+
+- **The `future_events` guard would have failed a correct edit.** Rewritten
+  under the same invalid evidence, it flagged any saved occurrence that came
+  back without recurrence rules. Editing the *last* occurrence of a series
+  legitimately produces exactly that — nothing follows it, so nothing recurs —
+  and it would have returned `502` for an edit that worked. Losing the rules now
+  only counts if the later occurrences were also left behind.
+
+  The guard stays, as a guard: no detachment has ever been observed on real
+  hardware, and the comments no longer claim otherwise. Code comments that
+  attributed the `isDetached` staleness to a measurement have been corrected —
+  that measurement never happened.
+
+- **`GET /v1/notes/:id?include_body=false` was slower than fetching the body.**
+  The full read gets the container inside `properties`; the metadata-only path
+  skipped that and fell through to a second `tell` block for the folder, with a
+  whole-library scan behind it. It reads the container in the block already
+  open. `include_body=false` exists so an oversized note stays reachable, not
+  to be fast, and the docs now say so — along with the real floor, ~0.56s of
+  AppleScript before this server does anything.
+
+- **`event(withIdentifier:)` never returns the series master for a composite
+  id.** Measured through the new diagnostic endpoint on four cases: it returns
+  nil for a live occurrence and the occurrence itself for a detached one. The
+  defensive re-check in `resolve` is therefore unreachable. It is kept as an
+  assertion, with the evidence recorded, rather than deleted — the cost is one
+  date comparison, and the cost of the observation not generalising across macOS
+  versions is a write to an occurrence the caller did not name.
+
 - **A 403 from `allowed_origins` read as "the service is not running", and that
   stopped the install dead.** With the ordinary configuration — bind to the LAN
   address, allow only n8n's — the installer's health probe used `curl -f`, so a

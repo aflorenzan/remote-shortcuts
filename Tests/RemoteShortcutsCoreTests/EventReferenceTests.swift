@@ -128,39 +128,55 @@ final class EventReferenceTests: XCTestCase {
 
 /// The `future_events` guard.
 ///
-/// The version this replaces asked `EKEvent.isDetached` after saving. That
-/// property is not refreshed on the in-memory object, so the guard never fired
-/// once in production while the unit tests stayed green — the tests never
-/// touched it. These cover the decision itself, on values read after the save.
+/// It has never fired on real hardware, and the reports that motivated its
+/// rewrite turned out to be `this_event` requests in disguise. These cover the
+/// rule anyway, including the case that would make it cry wolf.
 final class SpanOutcomeTests: XCTestCase {
-    /// What the Mac actually observed: the saved occurrence comes back with no
-    /// recurrence rules, and the later occurrences are untouched.
-    func testDetachedWhenSavedEventLostItsRecurrence() {
+    /// The failure it exists for: the saved occurrence is standalone and the
+    /// series carries on past it, unchanged.
+    func testDetachedWhenRulesAreLostAndLaterOccurrencesRemain() {
         XCTAssertTrue(
             SpanOutcome.detachedInsteadOfSplit(
                 savedEventStillRecurring: false,
+                laterOccurrencesRemainInOldSeries: true,
                 laterOccurrenceKeptOldTitle: false
             )
         )
     }
 
-    /// A later occurrence still wearing the old title proves nothing split,
-    /// whatever the saved event claims about itself.
+    /// Editing the **last** occurrence with `future_events` legitimately leaves
+    /// an event with no recurrence rules, because nothing follows it. The
+    /// earlier version of this rule flagged that as a failure and would have
+    /// returned 502 for a correct edit.
+    func testLastOccurrenceIsNotAFailure() {
+        XCTAssertFalse(
+            SpanOutcome.detachedInsteadOfSplit(
+                savedEventStillRecurring: false,
+                laterOccurrencesRemainInOldSeries: false,
+                laterOccurrenceKeptOldTitle: false
+            )
+        )
+    }
+
+    /// A later occurrence still wearing the old title proves the edit did not
+    /// reach it, whatever the saved event says about itself.
     func testDetachedWhenALaterOccurrenceKeptTheOldTitle() {
         XCTAssertTrue(
             SpanOutcome.detachedInsteadOfSplit(
                 savedEventStillRecurring: true,
+                laterOccurrencesRemainInOldSeries: true,
                 laterOccurrenceKeptOldTitle: true
             )
         )
     }
 
-    /// A real split: this event heads the new series, and no later occurrence
-    /// kept the old value. Must not report failure for an edit that worked.
+    /// The measured behaviour: the series splits, this event heads the new one,
+    /// and the later occurrences carry the edit. Must not report a failure.
     func testSplitIsNotReportedAsDetached() {
         XCTAssertFalse(
             SpanOutcome.detachedInsteadOfSplit(
                 savedEventStillRecurring: true,
+                laterOccurrencesRemainInOldSeries: true,
                 laterOccurrenceKeptOldTitle: false
             )
         )
