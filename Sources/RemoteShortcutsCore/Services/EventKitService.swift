@@ -12,7 +12,30 @@ public final class EventKitService: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.remoteshortcuts.eventkit")
     private let store = EKEventStore()
 
-    public init() {}
+    /// How long to wait for the user to answer a permission prompt raised from
+    /// inside a request. Short on purpose: see `promptOutcomes`.
+    private let promptTimeout: TimeInterval
+
+    /// What happened the one time this process asked for each entity.
+    ///
+    /// The prompt is raised **at most once per process**. Under launchd there
+    /// is frequently nobody watching to accept it, and re-asking on every
+    /// request meant paying the full timeout every time — a permission problem
+    /// presenting as a hang, with n8n seeing 60-second requests.
+    private var promptOutcomes: [UInt: PromptResult] = [:]
+    private let promptLock = NSLock()
+
+    public enum PromptResult {
+        case granted
+        case denied
+        /// Raised, never answered. Usually means nobody was looking at the
+        /// screen, which is the normal state for a background service.
+        case unanswered
+    }
+
+    public init(promptTimeoutSeconds: TimeInterval = 8) {
+        self.promptTimeout = promptTimeoutSeconds
+    }
 
     // MARK: - Authorisation
 
@@ -58,7 +81,7 @@ public final class EventKitService: @unchecked Sendable {
     /// Triggers the macOS permission prompt. Called by `preflight` during
     /// install so the user approves everything once, up front.
     @discardableResult
-    public func requestAccess(to entity: EKEntityType, timeout: TimeInterval = 120) -> Bool {
+    public func requestAccess(to entity: EKEntityType, timeout: TimeInterval = 120) -> PromptResult {
         let semaphore = DispatchSemaphore(value: 0)
         var granted = false
 
@@ -72,14 +95,34 @@ public final class EventKitService: @unchecked Sendable {
             switch entity {
             case .event: store.requestFullAccessToEvents(completion: completion)
             case .reminder: store.requestFullAccessToReminders(completion: completion)
-            @unknown default: return false
+            @unknown default: return .denied
             }
         } else {
             store.requestAccess(to: entity, completion: completion)
         }
 
-        _ = semaphore.wait(timeout: .now() + timeout)
-        return granted
+        // Distinguish "nobody answered" from "the user said no": they need
+        // different remedies, and reporting one as the other sends people to
+        // System Settings for a dialog they simply did not see.
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            recordPrompt(.unanswered, for: entity)
+            return .unanswered
+        }
+        let outcome: PromptResult = granted ? .granted : .denied
+        recordPrompt(outcome, for: entity)
+        return outcome
+    }
+
+    private func recordPrompt(_ outcome: PromptResult, for entity: EKEntityType) {
+        promptLock.lock()
+        promptOutcomes[UInt(entity.rawValue)] = outcome
+        promptLock.unlock()
+    }
+
+    private func priorPrompt(for entity: EKEntityType) -> PromptResult? {
+        promptLock.lock()
+        defer { promptLock.unlock() }
+        return promptOutcomes[UInt(entity.rawValue)]
     }
 
     /// The status TCC reports, corrected by what the process can actually do.
@@ -103,6 +146,32 @@ public final class EventKitService: @unchecked Sendable {
             store.calendars(for: entity).filter { !EventKitService.isPlaceholder($0) }.count
         }) ?? 0
         return visible > 0 ? .granted : .notDetermined
+    }
+
+    /// Raises the macOS prompts from **inside the service process**.
+    ///
+    /// This is the only way to grant the service anything. A privacy grant is
+    /// attributed to the responsible process: `preflight` run from a terminal
+    /// grants the terminal app, which tells you nothing about the LaunchAgent
+    /// and leaves it with no access at all.
+    ///
+    /// Generous timeout — unlike a request-path prompt, the caller here is a
+    /// person deliberately waiting to click Allow.
+    public func requestAllAccess(timeout: TimeInterval = 120) -> [String: Any] {
+        var report: [String: Any] = [:]
+        for (label, entity) in [("calendars", EKEntityType.event), ("reminders", .reminder)] {
+            let current = effectiveAccess(for: entity)
+            if current == .granted {
+                report[label] = "granted"
+                continue
+            }
+            switch requestAccess(to: entity, timeout: timeout) {
+            case .granted: report[label] = "granted"
+            case .denied: report[label] = "denied"
+            case .unanswered: report[label] = "unanswered"
+            }
+        }
+        return report
     }
 
     enum AccessKind { case read, write }
@@ -129,12 +198,28 @@ public final class EventKitService: @unchecked Sendable {
                 detail: "This Mac granted write-only access, so events can be created but not read. Reading would silently return nothing rather than fail, so the request is refused instead."
             )
         case .notDetermined:
-            // Ask now: a LaunchAgent session can still present the prompt.
-            if requestAccess(to: entity, timeout: 60) { return }
-            throw APIError.permissionDenied(
-                service: service,
-                detail: "The permission prompt was not accepted. Run 'remote-shortcuts preflight' from a terminal to grant it."
-            )
+            // Raise the prompt at most once per process, and briefly.
+            //
+            // Asking on every request with a 60-second wait meant each call sat
+            // for a full minute before its 403 — a permission problem
+            // presenting to n8n as a hang. Under launchd there is usually
+            // nobody watching to accept it, so the second request should fail
+            // in milliseconds with the same explanation.
+            let outcome = priorPrompt(for: entity) ?? requestAccess(to: entity, timeout: promptTimeout)
+            switch outcome {
+            case .granted:
+                return
+            case .denied:
+                throw APIError.permissionDenied(
+                    service: service,
+                    detail: "The permission prompt was declined. Re-enable it in System Settings → Privacy & Security → \(service)."
+                )
+            case .unanswered:
+                throw APIError.permissionDenied(
+                    service: service,
+                    detail: "The permission prompt went unanswered — most likely nobody was at the screen, which is normal for a background service. Ask the service to raise it again with POST /v1/system/permissions/request while you are watching, or grant it in System Settings → Privacy & Security → \(service)."
+                )
+            }
         case .denied:
             throw APIError.permissionDenied(service: service, detail: "Access was previously denied.")
         case .restricted:

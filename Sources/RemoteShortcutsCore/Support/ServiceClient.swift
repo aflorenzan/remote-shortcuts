@@ -1,0 +1,88 @@
+import Foundation
+
+/// Talks to a running server from the CLI.
+///
+/// `doctor` needs this because a CLI process cannot answer the question it is
+/// asked. macOS attributes a privacy grant to the **responsible process**: for
+/// a command run from a terminal, that is the terminal application. So reading
+/// `EKEventStore.authorizationStatus` from the CLI reports whether *Terminal*
+/// (or iTerm, or whatever) may read your calendars — which says nothing about
+/// the LaunchAgent, and reported a confident "granted ✓" while the service was
+/// returning 403 to every request.
+///
+/// The only process that can report the service's permissions is the service.
+struct ServiceClient {
+    let endpoint: URL
+    let token: String
+
+    enum ClientError: Error, CustomStringConvertible {
+        case unreachable(String)
+        case http(status: Int, body: String)
+
+        var description: String {
+            switch self {
+            case let .unreachable(detail): return detail
+            case let .http(status, body): return "HTTP \(status): \(body)"
+            }
+        }
+    }
+
+    static func fromConfiguration() -> ServiceClient? {
+        guard let result = try? ConfigurationLoader.load() else { return nil }
+        let configuration = result.configuration
+        // A server bound to 0.0.0.0 is reachable on loopback.
+        let host = configuration.host == "0.0.0.0" || configuration.host == "::"
+            ? "127.0.0.1"
+            : configuration.host
+        guard let url = URL(string: "http://\(host):\(configuration.port)") else { return nil }
+        return ServiceClient(endpoint: url, token: configuration.token)
+    }
+
+    func get(_ path: String, timeout: TimeInterval = 10) throws -> [String: Any] {
+        try send(method: "GET", path: path, timeout: timeout)
+    }
+
+    func post(_ path: String, timeout: TimeInterval = 180) throws -> [String: Any] {
+        try send(method: "POST", path: path, timeout: timeout)
+    }
+
+    private func send(method: String, path: String, timeout: TimeInterval) throws -> [String: Any] {
+        var request = URLRequest(url: endpoint.appendingPathComponent(path))
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = timeout
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var data: Data?
+        var response: URLResponse?
+        var transportError: Error?
+
+        // The CLI has no run loop of its own here, so the async call is bridged
+        // back with a semaphore.
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        let task = URLSession(configuration: configuration).dataTask(with: request) {
+            data = $0
+            response = $1
+            transportError = $2
+            semaphore.signal()
+        }
+        task.resume()
+
+        guard semaphore.wait(timeout: .now() + timeout + 5) == .success else {
+            task.cancel()
+            throw ClientError.unreachable("no reply within \(Int(timeout))s")
+        }
+        if let transportError {
+            throw ClientError.unreachable(transportError.localizedDescription)
+        }
+
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let body = data.flatMap { try? JSON.decodeObject($0) } ?? [:]
+        guard (200..<300).contains(status) else {
+            let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            throw ClientError.http(status: status, body: text)
+        }
+        return body
+    }
+}

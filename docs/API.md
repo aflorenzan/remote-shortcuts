@@ -58,6 +58,29 @@ as a self-describing entry point when wiring up a new automation.
 ### `GET /v1/health`
 No auth. `{"status":"ok","version":"1.0.0","time":"…"}`.
 
+### `POST /v1/system/permissions/request`
+
+Asks the **service** to raise the macOS permission prompts for Calendars and
+Reminders, and returns what happened.
+
+This is the only way to grant the service anything. macOS attributes a privacy
+grant to the *responsible process*: running `remote-shortcuts preflight` in a
+terminal grants **your terminal application**, not the LaunchAgent — so it can
+report success while the service still has no access at all.
+
+Somebody has to be at the Mac to accept the prompts, which appear on its screen.
+
+```json
+{
+  "requested": { "calendars": "granted", "reminders": "unanswered" },
+  "permissions": { "calendars": "granted", "reminders": "not_determined" },
+  "note": "A prompt went unanswered. …"
+}
+```
+
+`unanswered` means the prompt was raised and nobody responded — usually nobody
+was at the screen. That is different from `denied`, and has a different remedy.
+
 ### `GET /v1/system/permissions`
 ```json
 {
@@ -305,11 +328,17 @@ dictionary. Two consequences worth knowing:
 | `limit` | Default 50, max 500 |
 | `include_body` | `true` to include HTML bodies (slower, and see the size limit below) |
 
-> **Size limit.** The server buffers at most 8 MB from Apple Notes in one call.
-> Note bodies are HTML and can be large — a folder of long notes can pass 8 MB in
-> around 20 of them. Over the limit you get `413 payload_too_large` promptly,
-> not a hang; lower `limit`, or drop `include_body` and fetch the bodies you
-> actually need one note at a time.
+> **`include_body` is capped at 15 notes per call** (`max_notes_with_body`).
+> Note bodies are HTML and routinely run to hundreds of kilobytes each, so a few
+> dozen exceed the 8 MB the server buffers.
+>
+> The cap is checked **before** any work starts, and asking for more returns
+> `413` in milliseconds. It has to be: `osascript` returns its whole result at
+> the end, so an over-limit request is not detectable until everything has
+> already been computed — a 50-note request measured 17 seconds before failing.
+>
+> Raise `max_notes_with_body` in the config if your notes are short. Listing
+> without `include_body` is unaffected and goes up to 500.
 
 ### `GET /v1/notes/:id`
 Returns the note including `body` (HTML) and `plain_text`.

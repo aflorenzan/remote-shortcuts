@@ -213,31 +213,56 @@ public enum CLI {
     /// Triggers every macOS permission prompt in one go, from a terminal where
     /// the user is present to click Allow. Doing this at install time means the
     /// background LaunchAgent never has to ask.
+    /// Grants permissions **to the service**, by asking the service to prompt.
+    ///
+    /// Prompting from this process would grant the wrong thing. macOS
+    /// attributes a privacy grant to the responsible process, which for a
+    /// command run in a terminal is the terminal application — so the old
+    /// behaviour granted Terminal.app and left the LaunchAgent with nothing,
+    /// while printing "granted" and sending the user away satisfied.
     static func preflight() -> Int32 {
-        print("Requesting macOS permissions. Approve each prompt as it appears.\n")
+        print("Requesting macOS permissions for the service. Approve each prompt as it appears.\n")
 
-        let eventKit = EventKitService()
+        guard let client = ServiceClient.fromConfiguration() else {
+            fail("No configuration found. Run 'remote-shortcuts init' first.")
+            return 78
+        }
 
-        print("• Calendars … ", terminator: "")
+        var problems = 0
+
+        print("• Calendars and Reminders … ", terminator: "")
         fflush(stdout)
-        let calendars = eventKit.requestAccess(to: .event)
-        print(calendars ? "granted" : "NOT granted")
+        do {
+            let body = try client.post("/v1/system/permissions/request")
+            let requested = body["requested"] as? [String: Any] ?? [:]
+            print("")
+            for label in ["calendars", "reminders"] {
+                let state = requested[label] as? String ?? "unknown"
+                print("    \(label.capitalized): \(state)")
+                if state != "granted" { problems += 1 }
+            }
+            if let note = body["note"] as? String { print("    \(note)") }
+        } catch {
+            print("could not reach the service")
+            print("    \(error)")
+            print("")
+            print("    The service has to be running to be granted anything. Start it:")
+            print("      launchctl kickstart -k gui/$(id -u)/com.remoteshortcuts.server")
+            print("    then run preflight again.")
+            problems += 1
+        }
 
-        print("• Reminders … ", terminator: "")
-        fflush(stdout)
-        let reminders = eventKit.requestAccess(to: .reminder)
-        print(reminders ? "granted" : "NOT granted")
-
+        // Notes and Shortcuts go through Apple Events and the shortcuts CLI,
+        // which the service exercises itself on first use.
         print("• Apple Notes (Automation) … ", terminator: "")
         fflush(stdout)
-        var notesOK = false
         if NotesService.isAvailable() {
             do {
                 _ = try NotesService(timeout: 120).probe()
-                notesOK = true
-                print("granted")
+                print("reachable from this process")
+                print("    (the service raises its own Automation prompt on first use)")
             } catch {
-                print("NOT granted")
+                print("not granted here")
             }
         } else {
             print("Notes.app not installed — skipped")
@@ -246,17 +271,21 @@ public enum CLI {
         print("• Shortcuts CLI … ", terminator: "")
         let shortcutsAvailable = ShortcutsService.isAvailable()
         print(shortcutsAvailable ? "available" : "MISSING (needs macOS 12+)")
+        if !shortcutsAvailable { problems += 1 }
 
-        let allGood = calendars && reminders && (notesOK || !NotesService.isAvailable()) && shortcutsAvailable
         print("")
-        if allGood {
-            print("All set.")
+        if problems == 0 {
+            print("All set. Confirm with: remote-shortcuts doctor")
             return 0
         }
         print("""
-        Some permissions are missing. Grant them in:
-          System Settings → Privacy & Security → Calendars / Reminders / Automation
-        Then run 'remote-shortcuts preflight' again.
+        Some permissions are missing. Two routes that work:
+
+          1. Run this again with somebody at the Mac's screen to accept the prompts.
+          2. System Settings → Privacy & Security → Calendars / Reminders,
+             and enable 'Remote Shortcuts'.
+
+        Then: remote-shortcuts doctor
         """)
         return 1
     }
@@ -307,29 +336,79 @@ public enum CLI {
             problems += 1
         }
 
-        print("\nPermissions")
+        // Ask the SERVICE, not this process.
+        //
+        // A privacy grant belongs to the responsible process, which for a
+        // command run from a terminal is the terminal app. Reading
+        // EKEventStore here reported whether Terminal may see your calendars
+        // and printed a confident "granted ✓" while the LaunchAgent was
+        // answering 403 to every request. The service is the only process that
+        // can answer this question about itself.
+        print("\nPermissions — the service")
+        if let client = ServiceClient.fromConfiguration() {
+            do {
+                let body = try client.get("/v1/system/permissions")
+                let permissions = body["permissions"] as? [String: Any] ?? [:]
+
+                for label in ["calendars", "reminders"] {
+                    let state = permissions[label] as? String ?? "unknown"
+                    let name = label.capitalized
+                    switch state {
+                    case "granted":
+                        print("  \(name): granted ✓")
+                    case "write_only":
+                        print("  \(name): write-only ✗ — can create but not read")
+                        problems += 1
+                    case "not_determined":
+                        print("  \(name): never granted ✗ — the service has no access")
+                        problems += 1
+                    default:
+                        print("  \(name): \(state) ✗")
+                        problems += 1
+                    }
+                }
+                if let note = permissions["note"] as? String {
+                    print("  note: \(note)")
+                }
+                if problems > 0 {
+                    print("")
+                    print("  To grant them TO THE SERVICE, with somebody at the screen to accept:")
+                    print("    curl -X POST -H \"Authorization: Bearer $(remote-shortcuts token show)\" \\")
+                    print("      $(remote-shortcuts endpoint)/v1/system/permissions/request")
+                    print("  Or: System Settings → Privacy & Security → Calendars / Reminders")
+                    print("")
+                    print("  Note that 'remote-shortcuts preflight' from a terminal will NOT do it:")
+                    print("  macOS attributes the grant to your terminal app, not to the service.")
+                }
+            } catch {
+                print("  could not ask the service: \(error)")
+                print("  Start it, then run doctor again:")
+                print("    launchctl kickstart -k gui/$(id -u)/com.remoteshortcuts.server")
+                problems += 1
+            }
+        } else {
+            print("  no configuration, so there is no service to ask")
+            problems += 1
+        }
+
+        // Shown second, and labelled, so it can never be mistaken for the
+        // answer above. It is only useful for spotting the confusion itself.
+        print("\nPermissions — this terminal (not the service)")
         for (label, status) in [
             ("Calendars", EventKitService.authorisationStatus(for: .event)),
             ("Reminders", EventKitService.authorisationStatus(for: .reminder)),
         ] {
+            let described: String
             switch status {
-            case .granted:
-                print("  \(label): granted ✓")
-            case .writeOnly:
-                print("  \(label): write-only ✗ — can create but not read.")
-                print("    Grant full access: System Settings → Privacy & Security → \(label)")
-                problems += 1
-            case .notDetermined:
-                print("  \(label): not requested yet — run 'remote-shortcuts preflight'")
-                problems += 1
-            case .denied:
-                print("  \(label): denied ✗ — System Settings → Privacy & Security → \(label)")
-                problems += 1
-            case .restricted:
-                print("  \(label): restricted by policy ✗")
-                problems += 1
+            case .granted: described = "granted"
+            case .writeOnly: described = "write-only"
+            case .denied: described = "denied"
+            case .notDetermined: described = "never asked"
+            case .restricted: described = "restricted"
             }
+            print("  \(label): \(described)")
         }
+        print("  (informational — says nothing about the service)")
 
         print("\nDependencies")
         if ShortcutsService.isAvailable() {
